@@ -8,6 +8,7 @@ export interface UserProfile {
   altura: number;
   ultimoTreinoRealizado: string | null;
   dataCadastro: string;
+  totalTreinosConcluidos?: number;
 }
 
 export interface Exercicio {

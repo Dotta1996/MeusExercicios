@@ -17,7 +17,7 @@ export const WorkoutForm: React.FC = () => {
   
   const [allExercicios, setAllExercicios] = useState<Exercicio[]>([]);
   const [showCombineModal, setShowCombineModal] = useState(false);
-  const [combineSelection, setCombineSelection] = useState<string[]>([]);
+  const [combineSelection, setCombineSelection] = useState<string[]>(['', '']);
 
   useEffect(() => {
     if (!user) return;
@@ -49,10 +49,21 @@ export const WorkoutForm: React.FC = () => {
   };
 
   const addCombined = () => {
-    if (combineSelection.length === 2) {
-      setListaExercicios([...listaExercicios, { ids: [...combineSelection] }]);
-      setCombineSelection([]);
+    const valid = combineSelection.filter(id => Boolean(id && id.trim()));
+    if (valid.length >= 2) {
+      setListaExercicios([...listaExercicios, { ids: [...valid] }]);
+      setCombineSelection(['', '']);
       setShowCombineModal(false);
+    }
+  };
+
+  const addCombineSlot = () => {
+    setCombineSelection([...combineSelection, '']);
+  };
+
+  const removeCombineSlot = (indexToRemove: number) => {
+    if (combineSelection.length > 2) {
+      setCombineSelection(combineSelection.filter((_, idx) => idx !== indexToRemove));
     }
   };
 
@@ -147,10 +158,13 @@ export const WorkoutForm: React.FC = () => {
             <h3 className="text-lg font-semibold">Exercícios</h3>
             <button 
               type="button"
-              onClick={() => setShowCombineModal(true)}
-              className="text-xs bg-brand-900/30 text-brand-400 border border-brand-800/50 px-3 py-1.5 rounded-lg flex items-center"
+              onClick={() => {
+                setCombineSelection(['', '']);
+                setShowCombineModal(true);
+              }}
+              className="text-xs bg-brand-900/30 text-brand-400 border border-brand-800/50 px-3 py-1.5 rounded-lg flex items-center hover:bg-brand-900/50 transition-colors"
             >
-              <Layers size={14} className="mr-1.5" /> Combinar (Bi-set)
+              <Layers size={14} className="mr-1.5" /> Combinar (Bi-set, Tri-set...)
             </button>
           </div>
           
@@ -194,7 +208,11 @@ export const WorkoutForm: React.FC = () => {
                         </div>
                       )
                     })}
-                    {isCombined && <span className="inline-block mt-2 bg-brand-900/30 text-brand-500 text-[8px] font-black px-1.5 py-0.5 rounded border border-brand-800/50 uppercase">Combinado</span>}
+                    {isCombined && (
+                      <span className="inline-block mt-2 bg-brand-900/30 text-brand-500 text-[8px] font-black px-1.5 py-0.5 rounded border border-brand-800/50 uppercase">
+                        {ids.length === 2 ? 'Bi-set' : ids.length === 3 ? 'Tri-set' : `Super-série (${ids.length})`}
+                      </span>
+                    )}
                   </div>
 
                   <button type="button" onClick={() => removeSlot(index)} className="p-2 text-zinc-600 hover:text-red-400">
@@ -218,46 +236,94 @@ export const WorkoutForm: React.FC = () => {
 
       {/* Modal para combinar exercícios */}
       {showCombineModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-zinc-900 w-full max-w-sm rounded-3xl border border-zinc-800 p-6 shadow-2xl">
-            <h3 className="text-xl font-black text-white mb-4">Combinar Exercícios</h3>
-            <p className="text-xs text-zinc-500 mb-6">Selecione dois exercícios para executá-los em sequência (Bi-set).</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-zinc-900 w-full max-w-sm rounded-3xl border border-zinc-800 p-6 shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="flex justify-between items-start mb-1">
+              <h3 className="text-xl font-black text-white tracking-tight">Combinar Exercícios</h3>
+              <button 
+                type="button" 
+                onClick={() => { setShowCombineModal(false); setCombineSelection(['', '']); }}
+                className="p-1 text-zinc-400 hover:text-white rounded-lg"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-xs text-zinc-400 mb-4">
+              Selecione 2 ou mais exercícios para executá-los em sequência (Bi-set, Tri-set, Super-série).
+            </p>
             
-            <div className="space-y-4">
-              {[0, 1].map(i => (
-                <div key={i}>
-                  <label className="block text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-1.5">Exercício {i+1}</label>
+            <div className="space-y-3 overflow-y-auto pr-1 flex-1 max-h-[50vh]">
+              {combineSelection.map((selectedId, i) => (
+                <div key={i} className="bg-black/60 p-3 rounded-2xl border border-zinc-800/80">
+                  <div className="flex justify-between items-center mb-1.5">
+                    <label className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">
+                      Exercício {i + 1}
+                    </label>
+                    {combineSelection.length > 2 && (
+                      <button 
+                        type="button"
+                        onClick={() => removeCombineSlot(i)}
+                        className="text-zinc-500 hover:text-red-400 text-xs p-0.5 rounded transition-colors"
+                        title="Remover este exercício da combinação"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </div>
                   <select 
-                    value={combineSelection[i] || ""}
+                    value={selectedId || ""}
                     onChange={e => {
                       const newSel = [...combineSelection];
                       newSel[i] = e.target.value;
                       setCombineSelection(newSel);
                     }}
-                    className="w-full bg-black border border-zinc-800 rounded-xl px-4 py-3 text-white text-sm outline-none focus:ring-2 focus:ring-brand-500"
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-white text-sm outline-none focus:ring-2 focus:ring-brand-500"
                   >
                     <option value="">Selecionar...</option>
                     {allExercicios.map(ex => (
-                      <option key={ex.id} value={ex.id} disabled={combineSelection.includes(ex.id!)}>{ex.nome}</option>
+                      <option 
+                        key={ex.id} 
+                        value={ex.id} 
+                        disabled={combineSelection.some((id, selIdx) => selIdx !== i && id === ex.id)}
+                      >
+                        {ex.nome} ({ex.grupoMuscular})
+                      </option>
                     ))}
                   </select>
                 </div>
               ))}
+
+              <button
+                type="button"
+                onClick={addCombineSlot}
+                className="w-full py-3 px-4 border border-dashed border-zinc-700 hover:border-brand-500 text-zinc-300 hover:text-brand-400 rounded-2xl text-xs font-bold flex items-center justify-center space-x-2 transition-all bg-zinc-950/40 hover:bg-brand-950/20 active:scale-[0.99]"
+              >
+                <Plus size={15} />
+                <span>Adicionar mais exercício</span>
+              </button>
             </div>
 
-            <div className="mt-8 flex space-x-3">
+            <div className="mt-6 pt-3 border-t border-zinc-800 flex space-x-3 shrink-0">
               <button 
-                onClick={() => {setShowCombineModal(false); setCombineSelection([]);}}
-                className="flex-1 bg-zinc-800 text-white py-3 rounded-xl font-bold text-sm"
+                type="button"
+                onClick={() => { setShowCombineModal(false); setCombineSelection(['', '']); }}
+                className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white py-3 rounded-xl font-bold text-sm transition-colors"
               >
                 Cancelar
               </button>
               <button 
-                disabled={combineSelection.length < 2 || !combineSelection[0] || !combineSelection[1]}
+                type="button"
+                disabled={combineSelection.filter(id => Boolean(id && id.trim())).length < 2}
                 onClick={addCombined}
-                className="flex-1 bg-brand-600 disabled:opacity-30 text-white py-3 rounded-xl font-bold text-sm shadow-lg shadow-brand-900/40"
+                className="flex-1 bg-brand-600 hover:bg-brand-500 disabled:opacity-30 text-white py-3 rounded-xl font-bold text-sm shadow-lg shadow-brand-900/40 transition-colors"
               >
-                Combinar
+                {(() => {
+                  const count = combineSelection.filter(id => Boolean(id && id.trim())).length;
+                  if (count === 2) return "Combinar (Bi-set)";
+                  if (count === 3) return "Combinar (Tri-set)";
+                  if (count > 3) return `Combinar (${count} exs)`;
+                  return "Combinar";
+                })()}
               </button>
             </div>
           </div>

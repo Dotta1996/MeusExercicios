@@ -41,3 +41,39 @@ self.addEventListener('fetch', (event) => {
     })
   );
 });
+
+// Abertura/foco no app ao clicar na notificação da barra do celular
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client) {
+          return client.focus();
+        }
+      }
+      if (clients.openWindow) {
+        return clients.openWindow('/');
+      }
+    })
+  );
+});
+
+// Suporte a mensagens do app para exibir notificação direta ou agendada
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SHOW_TIMER_NOTIFICATION') {
+    const title = event.data.title || '⏱️ Descanso Concluído!';
+    const options = {
+      body: event.data.body || 'Hora da próxima série! Mantenha o foco.',
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+      vibrate: [300, 150, 300, 150, 450],
+      tag: 'workout-timer',
+      renotify: true,
+      requireInteraction: true,
+      silent: false,
+      data: event.data.data || { url: '/' }
+    };
+    self.registration.showNotification(title, options);
+  }
+});

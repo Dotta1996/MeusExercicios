@@ -1,9 +1,9 @@
 
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Play, Activity, CalendarDays, History, X, CheckCircle2, Circle, Clock, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Play, Activity, CalendarDays, History, X, CheckCircle2, Circle, Clock, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
 import { useAuth } from '../AuthContext';
-import { getTreinos, getExecucoes, getSessaoAtiva, getExercicios } from '../services/dbService';
+import { getTreinos, getExecucoesMes, getYearMonthKey, getSessaoAtiva, getExercicios } from '../services/dbService';
 import { Treino, ExecucaoTreino, SessaoAtiva, Exercicio } from '../types';
 // Fixed: replaced parseISO with native Date logic and fixed locale import path
 import { format, startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval, isSameDay, addMonths, subMonths, isToday, isSameMonth } from 'date-fns';
@@ -14,7 +14,9 @@ export const Home: React.FC = () => {
   const navigate = useNavigate();
   const [treinos, setTreinos] = useState<Treino[]>([]);
   const [exercicios, setExercicios] = useState<Record<string, Exercicio>>({});
-  const [execucoes, setExecucoes] = useState<ExecucaoTreino[]>([]);
+  const [monthExecucoes, setMonthExecucoes] = useState<ExecucaoTreino[]>([]);
+  const [recentExecucoes, setRecentExecucoes] = useState<ExecucaoTreino[]>([]);
+  const [monthLoading, setMonthLoading] = useState(false);
   const [nextTreino, setNextTreino] = useState<Treino | null>(null);
   const [sessaoAtiva, setSessaoAtiva] = useState<SessaoAtiva | null>(null);
   const [loading, setLoading] = useState(true);
@@ -23,18 +25,17 @@ export const Home: React.FC = () => {
   const [selectedExec, setSelectedExec] = useState<ExecucaoTreino | null>(null);
   const [currentMonth, setCurrentMonth] = useState(new Date());
 
+  // Carregamento inicial de treinos, exercícios e sessão ativa
   useEffect(() => {
     const fetchData = async () => {
       if (!user) return;
       try {
-        const [fetchedTreinos, fetchedExecucoes, fetchedSessao, fetchedExs] = await Promise.all([
+        const [fetchedTreinos, fetchedSessao, fetchedExs] = await Promise.all([
           getTreinos(user.uid),
-          getExecucoes(user.uid),
           getSessaoAtiva(user.uid),
           getExercicios(user.uid)
         ]);
         setTreinos(fetchedTreinos);
-        setExecucoes(fetchedExecucoes);
         setSessaoAtiva(fetchedSessao);
         
         const exsMap: Record<string, Exercicio> = {};
@@ -69,12 +70,64 @@ export const Home: React.FC = () => {
     fetchData();
   }, [user, profile]);
 
+  // Carregamento sob demanda do mês selecionado para o calendário (1 leitura mensal)
+  useEffect(() => {
+    if (!user) return;
+    const loadMonthData = async () => {
+      setMonthLoading(true);
+      try {
+        const ym = getYearMonthKey(currentMonth);
+        const execsMes = await getExecucoesMes(user.uid, ym);
+        setMonthExecucoes(execsMes);
+
+        // Se estivermos visualizando o mês atual real, carregamos também o mês anterior
+        // para garantir cálculo preciso dos últimos 7 dias e histórico recente
+        const isCurrentRealMonth = isSameMonth(currentMonth, new Date());
+        if (isCurrentRealMonth) {
+          const prevYm = getYearMonthKey(subMonths(currentMonth, 1));
+          const prevExecs = await getExecucoesMes(user.uid, prevYm);
+          const combined = [...execsMes, ...prevExecs].sort(
+            (a, b) => new Date(b.data).getTime() - new Date(a.data).getTime()
+          );
+          setRecentExecucoes(combined);
+        } else {
+          setRecentExecucoes(prev => {
+            const map = new Map<string, ExecucaoTreino>();
+            prev.forEach(e => map.set(e.id, e));
+            execsMes.forEach(e => map.set(e.id, e));
+            return Array.from(map.values()).sort(
+              (a, b) => new Date(b.data).getTime() - new Date(a.data).getTime()
+            );
+          });
+        }
+      } catch (err) {
+        console.error("Erro ao carregar mês do calendário:", err);
+      } finally {
+        setMonthLoading(false);
+      }
+    };
+    loadMonthData();
+  }, [user, currentMonth]);
+
   if (loading) return <div className="flex justify-center p-8"><Activity className="animate-pulse text-brand-500" /></div>;
 
-  const weeklyExecs = execucoes.filter(e => {
+  const weeklyExecs = recentExecucoes.filter(e => {
      const diff = new Date().getTime() - new Date(e.data).getTime();
      return diff <= 7 * 24 * 60 * 60 * 1000;
   });
+
+  const handleStartTreino = (treinoId: string) => {
+    try {
+      sessionStorage.removeItem(`workout_concluded_${treinoId}`);
+      if (sessionStorage.getItem('last_concluded_workout_id') === treinoId) {
+        sessionStorage.removeItem('last_concluded_workout_id');
+        sessionStorage.removeItem('last_concluded_workout_time');
+      }
+    } catch (e) {
+      console.warn("Erro ao limpar dados de sessão:", e);
+    }
+    navigate(`/execucao/${treinoId}`, { state: { startWorkout: true, timestamp: Date.now() } });
+  };
 
   const activeTreinoNome = sessaoAtiva ? treinos.find(t => t.id === sessaoAtiva.treinoId)?.nome : null;
 
@@ -119,7 +172,7 @@ export const Home: React.FC = () => {
             {treinos.map(t => (
               <button
                 key={t.id}
-                onClick={() => navigate(`/execucao/${t.id}`)}
+                onClick={() => handleStartTreino(t.id)}
                 className="w-full bg-zinc-950 border border-zinc-800 p-4 rounded-xl flex justify-between items-center text-left hover:border-brand-500 transition-colors"
               >
                 <div>
@@ -140,7 +193,7 @@ export const Home: React.FC = () => {
             <h3 className="text-2xl font-bold text-white mb-4">{nextTreino.nome}</h3>
             <p className="text-sm text-zinc-400 mb-6">{nextTreino.listaExercicios.length} exercícios na sequência</p>
             <button
-              onClick={() => navigate(`/execucao/${nextTreino.id}`)}
+              onClick={() => handleStartTreino(nextTreino.id)}
               className="w-full bg-brand-600 hover:bg-brand-500 text-white font-bold py-4 rounded-xl flex items-center justify-center space-x-2 transition-transform active:scale-95 shadow-lg shadow-brand-900/20"
             >
               <Play fill="currentColor" size={20} />
@@ -157,17 +210,22 @@ export const Home: React.FC = () => {
         )}
       </div>
 
-      {/* CALENDÁRIO DE TREINOS */}
-      <div className="bg-zinc-900 rounded-xl p-6 border border-zinc-800 shadow-sm">
+      {/* CALENDÁRIO DE TREINOS (Frequência Mensal otimizada para documento único por mês) */}
+      <div className="bg-zinc-900 rounded-xl p-6 border border-zinc-800 shadow-sm relative">
         <div className="flex justify-between items-center mb-6">
-          <h2 className="text-white font-bold flex items-center">
-            <CalendarDays size={18} className="mr-2 text-brand-500" />
-            Frequência Mensal
-          </h2>
+          <div className="flex items-center space-x-2">
+            <CalendarDays size={18} className="text-brand-500" />
+            <h2 className="text-white font-bold text-base">Frequência Mensal</h2>
+            {monthLoading && (
+              <Loader2 size={14} className="text-zinc-500 animate-spin ml-1" />
+            )}
+          </div>
           <div className="flex items-center space-x-4">
             <button 
+              type="button"
               onClick={() => setCurrentMonth(subMonths(currentMonth, 1))}
-              className="p-1 hover:bg-zinc-800 rounded-lg text-zinc-400 transition-colors"
+              className="p-1 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors"
+              title="Mês anterior"
             >
               <ChevronLeft size={20} />
             </button>
@@ -175,8 +233,10 @@ export const Home: React.FC = () => {
               {format(currentMonth, 'MMMM yyyy', { locale: ptBR })}
             </span>
             <button 
+              type="button"
               onClick={() => setCurrentMonth(addMonths(currentMonth, 1))}
-              className="p-1 hover:bg-zinc-800 rounded-lg text-zinc-400 transition-colors"
+              className="p-1 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors"
+              title="Próximo mês"
             >
               <ChevronRight size={20} />
             </button>
@@ -204,18 +264,25 @@ export const Home: React.FC = () => {
             });
 
             return calendarDays.map((day, i) => {
-              const hasWorkout = execucoes.some(exec => isSameDay(new Date(exec.data), day));
+              const dayWorkout = monthExecucoes.find(exec => isSameDay(new Date(exec.data), day));
+              const hasWorkout = Boolean(dayWorkout);
               const isCurrentMonth = isSameMonth(day, monthStart);
               const isDayToday = isToday(day);
 
               return (
                 <div 
                   key={i} 
-                  className={`aspect-square flex flex-col items-center justify-center rounded-xl text-xs font-bold relative transition-all
+                  onClick={() => {
+                    if (dayWorkout) {
+                      setSelectedExec(dayWorkout);
+                    }
+                  }}
+                  className={`aspect-square flex flex-col items-center justify-center rounded-xl text-xs font-bold relative transition-all select-none
                     ${!isCurrentMonth ? 'text-zinc-800' : 'text-zinc-400'}
-                    ${hasWorkout ? 'bg-brand-600/20 text-brand-400 border border-brand-500/30' : 'hover:bg-zinc-800/50'}
+                    ${hasWorkout ? 'bg-brand-600/20 text-brand-400 border border-brand-500/30 cursor-pointer hover:bg-brand-600/30 hover:scale-105 active:scale-95' : 'hover:bg-zinc-800/50'}
                     ${isDayToday ? 'ring-2 ring-zinc-700' : ''}
                   `}
+                  title={hasWorkout ? 'Clique para ver detalhes do treino' : undefined}
                 >
                   {day.getDate()}
                   {hasWorkout && (
@@ -254,7 +321,11 @@ export const Home: React.FC = () => {
             <Activity size={20} />
             <span className="font-semibold text-sm">Total Concluído</span>
           </div>
-          <p className="text-2xl font-bold text-white">{execucoes.filter(e => e.status === 'concluido').length}</p>
+          <p className="text-2xl font-bold text-white">
+            {profile?.totalTreinosConcluidos !== undefined 
+              ? profile.totalTreinosConcluidos 
+              : recentExecucoes.filter(e => e.status === 'concluido').length}
+          </p>
           <p className="text-xs text-zinc-500 mt-1">desde o início</p>
         </div>
       </div>
@@ -262,7 +333,7 @@ export const Home: React.FC = () => {
       <div>
         <h3 className="text-lg font-semibold mb-3 flex items-center"><History className="mr-2" size={20}/> Histórico Recente</h3>
         <div className="space-y-3">
-          {execucoes.slice(0, 5).map(exec => {
+          {recentExecucoes.slice(0, 5).map(exec => {
              const treinoNome = treinos.find(t => t.id === exec.treinoId)?.nome || 'Treino Excluído';
              return (
                <div 
@@ -272,7 +343,6 @@ export const Home: React.FC = () => {
                >
                  <div>
                    <p className="font-medium text-white">{treinoNome}</p>
-                   {/* Fixed: using native Date constructor instead of parseISO */}
                    <p className="text-xs text-zinc-400">{format(new Date(exec.data), "d 'de' MMMM, HH:mm", { locale: ptBR })}</p>
                  </div>
                  <div>
@@ -285,7 +355,7 @@ export const Home: React.FC = () => {
                </div>
              )
           })}
-          {execucoes.length === 0 && (
+          {recentExecucoes.length === 0 && (
             <p className="text-zinc-500 text-sm text-center py-4">Nenhum treino realizado ainda.</p>
           )}
         </div>

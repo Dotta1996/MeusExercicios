@@ -34,6 +34,19 @@ export const WorkoutsList: React.FC = () => {
     }
   };
 
+  const handleStartTreino = (treinoId: string) => {
+    try {
+      sessionStorage.removeItem(`workout_concluded_${treinoId}`);
+      if (sessionStorage.getItem('last_concluded_workout_id') === treinoId) {
+        sessionStorage.removeItem('last_concluded_workout_id');
+        sessionStorage.removeItem('last_concluded_workout_time');
+      }
+    } catch (e) {
+      console.warn("Erro ao limpar dados de sessão:", e);
+    }
+    navigate(`/execucao/${treinoId}`, { state: { startWorkout: true, timestamp: Date.now() } });
+  };
+
   if (loading) return <div className="text-center py-8 text-zinc-400">Carregando...</div>;
 
   return (
@@ -74,7 +87,7 @@ export const WorkoutsList: React.FC = () => {
               </div>
               <div className="flex space-x-2">
                 <button 
-                  onClick={() => navigate(`/execucao/${t.id}`)}
+                  onClick={() => t.id && handleStartTreino(t.id)}
                   className="p-2 text-brand-400 hover:text-brand-300 bg-brand-950/30 rounded-lg"
                   title="Iniciar Treino"
                 >

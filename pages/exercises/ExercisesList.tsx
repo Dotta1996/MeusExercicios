@@ -62,6 +62,11 @@ export const ExercisesList: React.FC = () => {
                     <span className="flex items-center"><Clock size={12} className="mr-1"/> {ex.timerPadrao}s</span>
                   )}
                 </div>
+                {ex.observacoes?.trim() && (
+                  <p className="text-xs text-zinc-400/80 mt-1.5 line-clamp-1 italic">
+                    Obs: {ex.observacoes}
+                  </p>
+                )}
               </div>
               <div className="flex space-x-2">
                 <button onClick={() => navigate(`/exercicios/editar/${ex.id}`)} className="p-2 text-zinc-400 hover:text-white bg-zinc-800 rounded-lg">

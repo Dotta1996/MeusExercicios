@@ -1,5 +1,8 @@
 {
   "name": "Meus Exercícios",
   "description": "Progressive Web App para gestão e acompanhamento de treinos de musculação.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
