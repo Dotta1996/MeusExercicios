@@ -15,6 +15,46 @@ View your app in AI Studio: https://ai.studio/apps/960bac0b-8a59-4b72-991c-46bb1
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. (Opcional) Set the `GEMINI_API_KEY` in [.env.local](.env.local) se voce usar recursos do Gemini
 3. Run the app:
    `npm run dev`
+
+## Deploy no Firebase Hosting com GitHub Actions
+
+Arquivos de deploy adicionados no projeto:
+
+- `firebase.json`
+- `.firebaserc`
+- `.github/workflows/firebase-hosting.yml`
+
+### 1) Defina o project id do Firebase
+
+No arquivo `.firebaserc`, troque `SEU_FIREBASE_PROJECT_ID` pelo ID real do seu projeto Firebase.
+
+### 2) Crie uma Service Account para deploy
+
+No Google Cloud Console do projeto Firebase:
+
+1. Acesse IAM e Admin > Service Accounts
+2. Crie (ou use) uma conta de servico para CI
+3. Dê permissao de Firebase Hosting Admin (ou Editor, se preferir)
+4. Gere uma chave JSON e copie o conteudo
+
+### 3) Configure secrets e variable no GitHub
+
+No repositorio GitHub, adicione:
+
+- Secret: `FIREBASE_SERVICE_ACCOUNT` com o JSON completo da service account
+- Variable: `FIREBASE_PROJECT_ID` com o ID do projeto Firebase
+
+### 4) Fluxo automatico
+
+- Push para `main`: faz build e deploy em producao (canal `live`)
+- Pull request: faz build e cria preview channel no Firebase Hosting
+
+### 5) Primeiro deploy local opcional
+
+Se quiser validar antes do CI:
+
+1. `npm run build`
+2. `npx firebase-tools deploy --only hosting`
