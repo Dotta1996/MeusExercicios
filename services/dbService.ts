@@ -3,41 +3,89 @@ import { db } from '../firebase';
 import { Exercicio, Treino, ExecucaoTreino, UserProfile, SessaoAtiva } from '../types';
 
 export const updateUserProfile = async (uid: string, data: Partial<UserProfile>) => {
+  try {
+    const cached = localStorage.getItem('meusex_user_profile');
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      localStorage.setItem('meusex_user_profile', JSON.stringify({ ...parsed, ...data }));
+    }
+  } catch (e) {}
   const docRef = doc(db, 'Users', uid);
   await updateDoc(docRef, data);
 };
 
-// Helper para gerenciar dados em documento único por usuário
+// Helper para gerenciar dados em documento único por usuário com persistência e cache offline
 const getUserData = async <T>(collectionName: string, userId: string): Promise<T[]> => {
-  const docRef = doc(db, collectionName, userId);
-  const docSnap = await getDoc(docRef);
-  if (docSnap.exists()) {
-    return docSnap.data().items || [];
+  const cacheKey = `meusex_cache_${collectionName}_${userId}`;
+  try {
+    const docRef = doc(db, collectionName, userId);
+    const docSnap = await getDoc(docRef);
+    if (docSnap.exists()) {
+      const items = (docSnap.data().items || []) as T[];
+      try {
+        localStorage.setItem(cacheKey, JSON.stringify(items));
+      } catch (e) {}
+      return items;
+    }
+    return [];
+  } catch (error) {
+    console.warn(`[Firestore Offline] Carregando ${collectionName} do armazenamento local:`, error);
+    try {
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        return JSON.parse(cached) as T[];
+      }
+    } catch (e) {}
+    return [];
   }
-  return [];
 };
 
 const saveUserData = async <T>(collectionName: string, userId: string, items: T[]) => {
+  const cacheKey = `meusex_cache_${collectionName}_${userId}`;
+  try {
+    localStorage.setItem(cacheKey, JSON.stringify(items));
+  } catch (e) {}
   const docRef = doc(db, collectionName, userId);
   await setDoc(docRef, { items }, { merge: true });
 };
 
 // --- Sessão Ativa ---
 export const saveSessaoAtiva = async (sessao: SessaoAtiva) => {
+  try {
+    localStorage.setItem(`meusex_sessao_ativa_${sessao.userId}`, JSON.stringify(sessao));
+  } catch (e) {}
   const docRef = doc(db, 'SessoesAtivas', sessao.userId);
   await setDoc(docRef, sessao);
 };
 
 export const getSessaoAtiva = async (userId: string): Promise<SessaoAtiva | null> => {
-  const docRef = doc(db, 'SessoesAtivas', userId);
-  const docSnap = await getDoc(docRef);
-  if (docSnap.exists()) {
-    return docSnap.data() as SessaoAtiva;
+  try {
+    const docRef = doc(db, 'SessoesAtivas', userId);
+    const docSnap = await getDoc(docRef);
+    if (docSnap.exists()) {
+      const data = docSnap.data() as SessaoAtiva;
+      try {
+        localStorage.setItem(`meusex_sessao_ativa_${userId}`, JSON.stringify(data));
+      } catch (e) {}
+      return data;
+    }
+    return null;
+  } catch (error) {
+    console.warn("[Firestore Offline] Tentando ler sessão ativa do cache local:", error);
+    try {
+      const cached = localStorage.getItem(`meusex_sessao_ativa_${userId}`);
+      if (cached) {
+        return JSON.parse(cached) as SessaoAtiva;
+      }
+    } catch (e) {}
+    return null;
   }
-  return null;
 };
 
 export const deleteSessaoAtiva = async (userId: string) => {
+  try {
+    localStorage.removeItem(`meusex_sessao_ativa_${userId}`);
+  } catch (e) {}
   const docRef = doc(db, 'SessoesAtivas', userId);
   await deleteDoc(docRef);
 };
@@ -164,14 +212,30 @@ export const getExecucoesMes = async (userId: string, yearMonth: string): Promis
     return monthlyCache.get(cacheKey)!;
   }
 
-  const docRef = doc(db, 'ExecucoesTreino', `${userId}_${yearMonth}`);
-  const docSnap = await getDoc(docRef);
+  const localKey = `meusex_execs_${userId}_${yearMonth}`;
+  try {
+    const docRef = doc(db, 'ExecucoesTreino', `${userId}_${yearMonth}`);
+    const docSnap = await getDoc(docRef);
 
-  if (docSnap.exists()) {
-    const items = (docSnap.data().items || []) as ExecucaoTreino[];
-    items.sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
-    monthlyCache.set(cacheKey, items);
-    return items;
+    if (docSnap.exists()) {
+      const items = (docSnap.data().items || []) as ExecucaoTreino[];
+      items.sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
+      monthlyCache.set(cacheKey, items);
+      try {
+        localStorage.setItem(localKey, JSON.stringify(items));
+      } catch (e) {}
+      return items;
+    }
+  } catch (err) {
+    console.warn(`[Firestore Offline] Buscando histórico do mês ${yearMonth} no cache local:`, err);
+    try {
+      const cached = localStorage.getItem(localKey);
+      if (cached) {
+        const items = JSON.parse(cached) as ExecucaoTreino[];
+        monthlyCache.set(cacheKey, items);
+        return items;
+      }
+    } catch (e) {}
   }
 
   // Verifica se ainda existem dados no documento legado ExecucoesTreino/{userId}
@@ -182,6 +246,7 @@ export const getExecucoesMes = async (userId: string, yearMonth: string): Promis
       const legacyItems = (legacySnap.data().items || []) as ExecucaoTreino[];
       if (legacyItems.length > 0) {
         await migrateLegacyExecucoes(userId, legacyItems);
+        const docRef = doc(db, 'ExecucoesTreino', `${userId}_${yearMonth}`);
         const recheckSnap = await getDoc(docRef);
         if (recheckSnap.exists()) {
           const items = (recheckSnap.data().items || []) as ExecucaoTreino[];

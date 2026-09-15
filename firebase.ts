@@ -1,5 +1,9 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import { 
+  initializeFirestore, 
+  persistentLocalCache, 
+  persistentMultipleTabManager 
+} from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB1ADYV7V1DFrNNzA2GSASjFFKdEqzPGAQ",
@@ -11,4 +15,13 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+
+// Configuração otimizada para conexões em iframe, webview e redes instáveis:
+// 1. experimentalForceLongPolling evita travamento do stream de WebSockets/WebChannel
+// 2. persistentLocalCache garante persistência em IndexedDB para funcionamento contínuo mesmo offline
+export const db = initializeFirestore(app, {
+  experimentalForceLongPolling: true,
+  localCache: persistentLocalCache({
+    tabManager: persistentMultipleTabManager()
+  })
+});

@@ -37,9 +37,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setProfile(data);
         setUser({ uid: data.uid });
         localStorage.setItem('meusex_user_id', data.uid);
+        localStorage.setItem('meusex_user_profile', JSON.stringify(data));
       }
     } catch (error) {
-      console.error("Erro ao buscar perfil:", error);
+      console.warn("Aviso ao buscar perfil (modo offline ativado):", error);
+      // Fallback para perfil em cache local se estiver sem rede ou offline
+      const cached = localStorage.getItem('meusex_user_profile');
+      if (cached) {
+        try {
+          const data = JSON.parse(cached) as UserProfile;
+          setProfile(data);
+          setUser({ uid: data.uid });
+        } catch (e) {}
+      }
     }
   };
 
@@ -61,6 +71,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setUser({ uid: data.uid });
           setProfile(data);
           localStorage.setItem('meusex_user_id', data.uid);
+          localStorage.setItem('meusex_user_profile', JSON.stringify(data));
         } else {
           throw new Error("Senha incorreta.");
         }
@@ -82,6 +93,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUser({ uid: newUid });
         setProfile(newProfile);
         localStorage.setItem('meusex_user_id', newUid);
+        localStorage.setItem('meusex_user_profile', JSON.stringify(newProfile));
       }
     } catch (error: any) {
       console.error("Erro no login manual:", error);
@@ -95,6 +107,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
     setProfile(null);
     localStorage.removeItem('meusex_user_id');
+    localStorage.removeItem('meusex_user_profile');
   };
 
   const refreshProfile = async () => {
@@ -105,6 +118,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     const savedUid = localStorage.getItem('meusex_user_id');
+    const cached = localStorage.getItem('meusex_user_profile');
+    if (cached) {
+      try {
+        const data = JSON.parse(cached) as UserProfile;
+        setProfile(data);
+        setUser({ uid: data.uid });
+      } catch (e) {}
+    }
     if (savedUid) {
       fetchProfile(savedUid).finally(() => setLoading(false));
     } else {

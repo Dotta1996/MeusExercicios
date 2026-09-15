@@ -1,4 +1,4 @@
-const CACHE_NAME = 'meusex-v1.5.0';
+const CACHE_NAME = 'meusex-v1.5.1';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
@@ -372,13 +372,41 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  if (event.request.url.includes('firestore.googleapis.com') || 
-      event.request.url.includes('identitytoolkit.googleapis.com')) {
+  // Ignora requisições que não sejam GET (ex: POST, PUT, DELETE) para evitar erro no Cache API
+  if (event.request.method !== 'GET') {
+    return;
+  }
+
+  let url;
+  try {
+    url = new URL(event.request.url);
+  } catch (e) {
+    return;
+  }
+
+  // Não interceptar requisições externas, APIs do Google, Firebase, Firestore ou rotas de API
+  if (
+    url.origin !== self.location.origin ||
+    url.hostname.includes('googleapis.com') ||
+    url.hostname.includes('firebaseapp.com') ||
+    url.hostname.includes('firebaseio.com') ||
+    url.hostname.includes('gstatic.com') ||
+    url.pathname.startsWith('/api/')
+  ) {
     return;
   }
   
   event.respondWith(
-    caches.match(event.request).then((response) => response || fetch(event.request))
+    caches.match(event.request).then((response) => {
+      if (response) {
+        return response;
+      }
+      return fetch(event.request);
+    }).catch(() => {
+      if (event.request.mode === 'navigate') {
+        return caches.match('/index.html');
+      }
+    })
   );
 });
 
