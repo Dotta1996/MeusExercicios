@@ -61,7 +61,9 @@ export interface ExecucaoTreino {
 export interface SessaoAtiva {
   userId: string;
   treinoId: string;
+  treinoNome?: string;
   dataInicio: string;
   execucaoData: Record<string, ExercicioExecutado>;
   activeSlotIndex: number | null;
+  lastUpdated?: number;
 }

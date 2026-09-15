@@ -22,15 +22,16 @@ export interface StoredWorkoutSession {
   dataInicio: string;
   userId: string;
   activeTimer?: {
-    targetEndTime: number;
-    duration: number;
-    slotIndex: number;
-    serieIndex: number;
-    exName: string;
-    currentSerieNum: number;
-    totalSeries: number;
-    currentPeso: number;
-    currentReps: number;
+    targetEndTime?: number;
+    duration?: number;
+    timerDuration?: number;
+    slotIndex?: number;
+    serieIndex?: number;
+    exName?: string;
+    currentSerieNum?: number;
+    totalSeries?: number;
+    currentPeso?: number;
+    currentReps?: number;
   } | null;
   lastUpdated: number;
 }

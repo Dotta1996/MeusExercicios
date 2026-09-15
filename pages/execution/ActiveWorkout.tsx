@@ -98,6 +98,33 @@ export const ActiveWorkout: React.FC = () => {
           setExecucaoData(sessaoSalva.execucaoData);
           setActiveSlotIndex(sessaoSalva.activeSlotIndex);
           setDataInicio(sessaoSalva.dataInicio);
+          saveStoredWorkoutSession({
+            treinoId: t.id!,
+            treinoNome: t.nome,
+            treino: t,
+            allExs: exsMap,
+            execucaoData: sessaoSalva.execucaoData,
+            activeSlotIndex: sessaoSalva.activeSlotIndex ?? 0,
+            dataInicio: sessaoSalva.dataInicio,
+            userId: user.uid,
+            lastUpdated: Date.now()
+          });
+          if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage({
+              type: 'SYNC_WORKOUT_STATE',
+              session: {
+                treinoId: t.id!,
+                treinoNome: t.nome,
+                treino: t,
+                allExs: exsMap,
+                execucaoData: sessaoSalva.execucaoData,
+                activeSlotIndex: sessaoSalva.activeSlotIndex ?? 0,
+                dataInicio: sessaoSalva.dataInicio,
+                userId: user.uid,
+                lastUpdated: Date.now()
+              }
+            });
+          }
         } else {
           // Se não há sessão ativa em andamento no banco, verificar se este treino
           // foi encerrado recentemente e o usuário caiu aqui pelo botão 'voltar' do celular/navegador.
@@ -212,11 +239,14 @@ export const ActiveWorkout: React.FC = () => {
       const sessao: SessaoAtiva = {
         userId: user.uid,
         treinoId: id,
+        treinoNome: treino.nome,
         dataInicio,
         execucaoData,
-        activeSlotIndex: activeSlotIndex
+        activeSlotIndex: activeSlotIndex,
+        lastUpdated: Date.now()
       };
       await saveSessaoAtiva(sessao);
+      syncSessionToLocalAndSW(execucaoData, activeSlotIndex ?? 0);
     };
 
     saveSession();
@@ -307,6 +337,14 @@ export const ActiveWorkout: React.FC = () => {
         session
       });
     }
+    try {
+      const bc = new BroadcastChannel('workout_sync_channel');
+      bc.postMessage({
+        type: 'WORKOUT_STATE_UPDATED',
+        session
+      });
+      bc.close();
+    } catch (e) {}
   };
 
   const clearWorkoutNotification = async () => {
@@ -865,11 +903,17 @@ export const ActiveWorkout: React.FC = () => {
     
     const firstKey = `${slotIndex}-${ids[0]}`;
     const currentData = execucaoDataRef.current;
-    if (!currentData[firstKey] || !currentData[firstKey].series[sIndex]) return;
+    if (!currentData[firstKey] || !currentData[firstKey].series) return;
 
-    // Se a série já foi concluída, não faz nada (idempotente)
-    if (currentData[firstKey].series[sIndex].concluida) {
-      return;
+    // Se a série indicada já estiver concluída ou fora dos limites, encontrar a primeira pendente
+    let targetIdx = sIndex;
+    if (!currentData[firstKey].series[targetIdx] || currentData[firstKey].series[targetIdx].concluida) {
+      const pendingIdx = currentData[firstKey].series.findIndex(s => !s.concluida);
+      if (pendingIdx !== -1) {
+        targetIdx = pendingIdx;
+      } else {
+        return; // Todas as séries já estão concluídas
+      }
     }
 
     // Obter o timer configurado no exercício
@@ -880,8 +924,8 @@ export const ActiveWorkout: React.FC = () => {
       const key = `${slotIndex}-${exId}`;
       if (next[key]) {
         const newSeries = [...next[key].series];
-        if (newSeries[sIndex]) {
-          newSeries[sIndex] = { ...newSeries[sIndex], concluida: true };
+        if (newSeries[targetIdx]) {
+          newSeries[targetIdx] = { ...newSeries[targetIdx], concluida: true };
         }
         next[key] = { ...next[key], series: newSeries };
       }
@@ -905,7 +949,7 @@ export const ActiveWorkout: React.FC = () => {
           }
           return prev;
         });
-      }, 400);
+      }, 500);
     } else {
       ids.forEach(id => { 
         const key = `${slotIndex}-${id}`;
@@ -933,7 +977,7 @@ export const ActiveWorkout: React.FC = () => {
     
     const firstKey = `${slotIndex}-${ids[0]}`;
     const currentData = execucaoDataRef.current;
-    if (!currentData[firstKey] || !currentData[firstKey].series[sIndex]) return;
+    if (!currentData[firstKey] || !currentData[firstKey].series || !currentData[firstKey].series[sIndex]) return;
 
     const newState = !currentData[firstKey].series[sIndex].concluida;
 
@@ -972,7 +1016,7 @@ export const ActiveWorkout: React.FC = () => {
             }
             return prev;
           });
-        }, 400);
+        }, 500);
       } else {
         ids.forEach(id => { 
           const key = `${slotIndex}-${id}`;
@@ -995,6 +1039,112 @@ export const ActiveWorkout: React.FC = () => {
       startTimer(timerDuration, slotIndex, next);
     }
   };
+
+  // Sincronização em tempo real das ações do Service Worker (smartwatch / barra de notificações / abas)
+  useEffect(() => {
+    if (!isInitialized || !id) return;
+
+    const handleRemoteSessionUpdate = (session: StoredWorkoutSession) => {
+      if (!session || session.treinoId !== id || !session.execucaoData) return;
+      
+      execucaoDataRef.current = session.execucaoData;
+      setExecucaoData(session.execucaoData);
+      
+      if (session.activeSlotIndex !== undefined && session.activeSlotIndex !== null) {
+        activeSlotIndexRef.current = session.activeSlotIndex;
+        setActiveSlotIndex(session.activeSlotIndex);
+      }
+      
+      if (session.activeTimer && session.activeTimer.targetEndTime) {
+        const remaining = Math.max(0, Math.ceil((session.activeTimer.targetEndTime - Date.now()) / 1000));
+        if (remaining > 0) {
+          targetEndTimeRef.current = session.activeTimer.targetEndTime;
+          setTimeLeft(remaining);
+          setTimerActive(true);
+        } else {
+          targetEndTimeRef.current = null;
+          setTimeLeft(0);
+          setTimerActive(false);
+        }
+      } else if (session.activeTimer === null) {
+        targetEndTimeRef.current = null;
+        setTimeLeft(null);
+        setTimerActive(false);
+      }
+    };
+
+    const handleSwMessage = (event: MessageEvent) => {
+      if (!event.data) return;
+      if (event.data.type === 'WORKOUT_STATE_UPDATED' && event.data.session) {
+        handleRemoteSessionUpdate(event.data.session);
+      } else if (event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
+        if (event.data.action === 'skip_rest') {
+          stopTimer();
+        } else if (event.data.action === 'repeat_rest') {
+          const dur = event.data.duration || 60;
+          startTimer(dur);
+        } else if (event.data.action === 'complete_set') {
+          if (event.data.slotIdx !== undefined && event.data.serieIdx !== undefined) {
+            completeSerieSlot(event.data.slotIdx, event.data.serieIdx);
+          }
+        }
+      }
+    };
+
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('workout_sync_channel');
+      bc.onmessage = (event) => {
+        if (event.data?.type === 'WORKOUT_STATE_UPDATED' && event.data.session) {
+          handleRemoteSessionUpdate(event.data.session);
+        } else if (event.data?.type === 'WORKOUT_NOTIFICATION_ACTION') {
+          if (event.data.action === 'skip_rest') {
+            stopTimer();
+          } else if (event.data.action === 'repeat_rest') {
+            startTimer(event.data.duration || 60);
+          } else if (event.data.action === 'complete_set') {
+            if (event.data.slotIdx !== undefined && event.data.serieIdx !== undefined) {
+              completeSerieSlot(event.data.slotIdx, event.data.serieIdx);
+            }
+          }
+        }
+      };
+    } catch (e) {}
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    }
+
+    // Sincronizar sempre que o usuário retornar ao app ou desbloquear a tela
+    const handleVisibilitySync = async () => {
+      if (document.visibilityState === 'visible') {
+        try {
+          const session = await getStoredWorkoutSession();
+          if (session && session.treinoId === id && session.execucaoData) {
+            handleRemoteSessionUpdate(session);
+          }
+        } catch (e) {
+          console.warn("Erro ao sincronizar sessão ativa na visibilidade:", e);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilitySync);
+    window.addEventListener('focus', handleVisibilitySync);
+    window.addEventListener('pageshow', handleVisibilitySync);
+
+    return () => {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+      }
+      if (bc) {
+        bc.close();
+      }
+      document.removeEventListener('visibilitychange', handleVisibilitySync);
+      window.removeEventListener('focus', handleVisibilitySync);
+      window.removeEventListener('pageshow', handleVisibilitySync);
+    };
+  }, [id, isInitialized]);
 
   const addSerieToSlot = (slotIndex: number) => {
     if (!treino) return;
@@ -1439,9 +1589,15 @@ export const ActiveWorkout: React.FC = () => {
                       const isSerieDone = ids.every(id => execucaoData[`${slotIndex}-${id}`]?.series[sIndex]?.concluida);
                       
                       return (
-                        <div key={sIndex} className={`flex items-center justify-between p-3 rounded-2xl border transition-all ${isSerieDone ? 'bg-brand-950/10 border-brand-500/30' : 'bg-black border-zinc-800/50'}`}>
-                          <div className="flex items-center space-x-4">
-                            <span className="font-black text-zinc-600 text-xs w-4">{sIndex + 1}</span>
+                        <div 
+                          key={sIndex} 
+                          className={`flex items-center justify-between p-3 sm:p-3.5 rounded-2xl border transition-all ${isSerieDone ? 'bg-brand-950/20 border-brand-500/40 shadow-sm' : 'bg-black border-zinc-800/60'}`}
+                        >
+                          <div 
+                            onClick={() => toggleSerieSlot(slotIndex, sIndex)}
+                            className="flex items-center space-x-4 flex-1 cursor-pointer select-none py-1"
+                          >
+                            <span className={`font-black text-xs w-4 ${isSerieDone ? 'text-brand-400' : 'text-zinc-600'}`}>{sIndex + 1}</span>
                             <div className="space-y-1">
                                 {ids.map(exId => {
                                     const ex = allExs[exId];
@@ -1454,7 +1610,7 @@ export const ActiveWorkout: React.FC = () => {
                                             <span className="font-black text-white">{serie?.peso}{u1}</span>
                                             <span className="text-zinc-500">×</span>
                                             <span className="font-black text-white">{serie?.reps}</span>
-                                            <span className="text-[8px] text-zinc-600 uppercase font-black">
+                                            <span className="text-[8px] text-zinc-500 uppercase font-black">
                                               {isCombined ? ex?.nome.substring(0,8) + '..' : u2}
                                             </span>
                                         </div>
@@ -1464,10 +1620,15 @@ export const ActiveWorkout: React.FC = () => {
                           </div>
                           
                           <button 
-                            onClick={() => toggleSerieSlot(slotIndex, sIndex)}
-                            className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${isSerieDone ? 'bg-green-500 text-white shadow-lg' : 'bg-zinc-800 text-zinc-600'}`}
+                            type="button"
+                            aria-label={`Concluir série ${sIndex + 1}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleSerieSlot(slotIndex, sIndex);
+                            }}
+                            className={`min-w-[48px] min-h-[48px] w-12 h-12 rounded-xl flex items-center justify-center transition-all active:scale-90 touch-manipulation cursor-pointer shrink-0 ${isSerieDone ? 'bg-green-500 text-white shadow-lg shadow-green-900/40' : 'bg-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700'}`}
                           >
-                            <Check strokeWidth={4} size={20} />
+                            <Check strokeWidth={3.5} size={22} />
                           </button>
                         </div>
                       )

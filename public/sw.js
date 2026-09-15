@@ -91,6 +91,12 @@ const notifyClients = (payload) => {
       });
     }
   });
+
+  try {
+    const bc = new BroadcastChannel('workout_sync_channel');
+    bc.postMessage(payload);
+    bc.close();
+  } catch (e) {}
 };
 
 // Renderizar notificação de descanso durante a contagem regressiva
@@ -196,37 +202,69 @@ const startSWTimer = (timerInfo) => {
 // --- PROCESSAR CONCLUSÃO DE SÉRIE DIRETO NO SERVICE WORKER (EM SEGUNDO PLANO) ---
 async function handleCompleteSetInSW(slotIdx, serieIdx) {
   let session = await getStoredSession();
-  if (!session || !session.treino || !session.execucaoData) return;
+  if (!session || !session.treino || !session.execucaoData) {
+    console.warn('[SW] Sessão não encontrada no IndexedDB');
+    return;
+  }
 
   const { treino, execucaoData } = session;
-  const slot = treino.listaExercicios[slotIdx];
+  let targetSlotIdx = slotIdx;
+  let slot = treino.listaExercicios[targetSlotIdx];
   if (!slot) return;
-  const ids = typeof slot === 'string' ? [slot] : slot.ids;
+  let ids = typeof slot === 'string' ? [slot] : slot.ids;
+  let firstId = ids[0];
 
-  // Marcar a série como concluída para todos os exercícios deste slot
-  ids.forEach(exId => {
-    const key = `${slotIdx}-${exId}`;
-    if (execucaoData[key] && execucaoData[key].series && execucaoData[key].series[serieIdx]) {
-      execucaoData[key].series[serieIdx].concluida = true;
+  // Identificar com precisão qual série marcar como concluída
+  const firstSlotSeries = execucaoData[`${targetSlotIdx}-${firstId}`]?.series || [];
+  let targetSerieIdx = serieIdx;
+
+  // Se a série passada já estiver concluída ou fora dos limites, busca a primeira pendente no slot
+  if (targetSerieIdx < 0 || targetSerieIdx >= firstSlotSeries.length || firstSlotSeries[targetSerieIdx]?.concluida) {
+    const pendingIdx = firstSlotSeries.findIndex(s => !s.concluida);
+    if (pendingIdx !== -1) {
+      targetSerieIdx = pendingIdx;
+    } else {
+      // Se todas as séries deste slot já foram concluídas, localiza o próximo slot com séries pendentes
+      const nextPendingSlot = treino.listaExercicios.findIndex((sl, idx) => {
+        const sIds = typeof sl === 'string' ? [sl] : sl.ids;
+        return !sIds.every(id => execucaoData[`${idx}-${id}`]?.concluido);
+      });
+      if (nextPendingSlot !== -1) {
+        targetSlotIdx = nextPendingSlot;
+        slot = treino.listaExercicios[targetSlotIdx];
+        ids = typeof slot === 'string' ? [slot] : slot.ids;
+        firstId = ids[0];
+        const nextSeries = execucaoData[`${targetSlotIdx}-${firstId}`]?.series || [];
+        targetSerieIdx = nextSeries.findIndex(s => !s.concluida);
+      }
     }
-  });
+  }
+
+  if (targetSerieIdx !== -1) {
+    // Marcar a série como concluída para todos os exercícios deste slot
+    ids.forEach(exId => {
+      const key = `${targetSlotIdx}-${exId}`;
+      if (execucaoData[key] && execucaoData[key].series && execucaoData[key].series[targetSerieIdx]) {
+        execucaoData[key].series[targetSerieIdx].concluida = true;
+      }
+    });
+  }
 
   // Checar se todas as séries deste slot foram concluídas
-  const firstId = ids[0];
   const allSeriesInSlotDone = ids.every(id => {
-    const s = execucaoData[`${slotIdx}-${id}`]?.series;
+    const s = execucaoData[`${targetSlotIdx}-${id}`]?.series;
     return s && s.every(item => item.concluida);
   });
 
   if (allSeriesInSlotDone) {
     ids.forEach(id => {
-      const key = `${slotIdx}-${id}`;
+      const key = `${targetSlotIdx}-${id}`;
       if (execucaoData[key]) execucaoData[key].concluido = true;
     });
   }
 
   // Localizar a próxima série pendente e o tempo configurado do exercício
-  let nextSlotIdx = slotIdx;
+  let nextSlotIdx = targetSlotIdx;
   let nextSerieIdx = -1;
   let nextExName = '';
   let nextPeso = 0;
@@ -236,7 +274,7 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
   let timerEnabled = true;
 
   // 1. Verificar se ainda há série pendente no mesmo slot
-  const currentSlotSeries = execucaoData[`${slotIdx}-${firstId}`]?.series || [];
+  const currentSlotSeries = execucaoData[`${targetSlotIdx}-${firstId}`]?.series || [];
   const nextInSlot = currentSlotSeries.findIndex(s => !s.concluida);
 
   if (nextInSlot !== -1) {
@@ -287,7 +325,7 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
   }
 
   // Atualizar sessão no IndexedDB
-  session.activeSlotIndex = nextSlotIdx !== -1 ? nextSlotIdx : slotIdx;
+  session.activeSlotIndex = nextSlotIdx !== -1 ? nextSlotIdx : targetSlotIdx;
   session.execucaoData = execucaoData;
   session.lastUpdated = Date.now();
 
@@ -297,6 +335,13 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
     session.activeTimer = null;
     await saveStoredSession(session);
     notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
+    notifyClients({
+      type: 'WORKOUT_NOTIFICATION_ACTION',
+      action: 'complete_set',
+      slotIdx: targetSlotIdx,
+      serieIdx: targetSerieIdx,
+      timestamp: Date.now()
+    });
 
     await self.registration.showNotification("🎉 Treino Concluído!", {
       body: "Todas as séries foram finalizadas! Toque para salvar e encerrar.",
@@ -331,6 +376,13 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
     session.activeTimer = activeTimer;
     await saveStoredSession(session);
     notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
+    notifyClients({
+      type: 'WORKOUT_NOTIFICATION_ACTION',
+      action: 'complete_set',
+      slotIdx: targetSlotIdx,
+      serieIdx: targetSerieIdx,
+      timestamp: Date.now()
+    });
 
     startSWTimer(activeTimer);
   } else {
@@ -339,6 +391,13 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
     session.activeTimer = null;
     await saveStoredSession(session);
     notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
+    notifyClients({
+      type: 'WORKOUT_NOTIFICATION_ACTION',
+      action: 'complete_set',
+      slotIdx: targetSlotIdx,
+      serieIdx: targetSerieIdx,
+      timestamp: Date.now()
+    });
 
     await self.registration.showNotification(`🏋️ ${nextExName} (${nextSerieIdx + 1}/${totalSeries})`, {
       body: `${nextReps} reps • ${nextPeso}kg | Toque abaixo ao concluir`,
