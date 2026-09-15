@@ -30,6 +30,8 @@ export const ActiveWorkout: React.FC = () => {
   const timerRef = useRef<number | null>(null);
   const targetEndTimeRef = useRef<number | null>(null);
   const silentKeepAliveRef = useRef<{ ctx: AudioContext; osc: OscillatorNode; gain: GainNode } | null>(null);
+  const audioKeepAliveElRef = useRef<HTMLAudioElement | null>(null);
+  const lastActionTimestampRef = useRef<number>(0);
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | 'unsupported'>('default');
 
   // Modo Notificação Interativa para Smartwatch / Barra de Notificações
@@ -217,6 +219,34 @@ export const ActiveWorkout: React.FC = () => {
     };
   }, []);
 
+  // Manter a tela ativa durante o treino (Screen Wake Lock API)
+  useEffect(() => {
+    let wakeLockSentinel: any = null;
+    const requestWake = async () => {
+      try {
+        if ('wakeLock' in navigator && (navigator as any).wakeLock) {
+          wakeLockSentinel = await (navigator as any).wakeLock.request('screen');
+        }
+      } catch {}
+    };
+
+    requestWake();
+
+    const onVisChange = () => {
+      if (document.visibilityState === 'visible') {
+        requestWake();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisChange);
+      if (wakeLockSentinel) {
+        wakeLockSentinel.release().catch(() => {});
+      }
+    };
+  }, []);
+
   const clearWorkoutNotification = async () => {
     try {
       if ("serviceWorker" in navigator) {
@@ -231,7 +261,7 @@ export const ActiveWorkout: React.FC = () => {
     }
   };
 
-  const syncWorkoutNotification = async (overrideTimeLeft?: number | null) => {
+  const syncWorkoutNotification = async (overrideTimeLeft?: number | null, overrideExecData?: Record<string, ExercicioExecutado>) => {
     if (!("Notification" in window) || Notification.permission !== "granted" || !watchModeEnabledRef.current) return;
     if (!treinoRef.current) return;
 
@@ -240,7 +270,7 @@ export const ActiveWorkout: React.FC = () => {
       const reg = await navigator.serviceWorker.ready;
       if (!reg || !("showNotification" in reg)) return;
 
-      const currentExecData = execucaoDataRef.current;
+      const currentExecData = overrideExecData || execucaoDataRef.current;
       const currentSlotIdx = activeSlotIndexRef.current ?? 0;
       const currentTreino = treinoRef.current;
       const activeTimer = timerActiveRef.current;
@@ -303,12 +333,13 @@ export const ActiveWorkout: React.FC = () => {
       if (activeTimer && currentTime !== null && currentTime > 0) {
         const mins = Math.floor(currentTime / 60);
         const secs = (currentTime % 60).toString().padStart(2, '0');
-        await reg.showNotification(`⏱️ Descanso: ${mins}:${secs}`, {
-          body: `Próx: Série ${currentSerieNum}/${totalSeries} de ${exName} (${currentPeso}kg • ${currentReps} reps)`,
+        await reg.showNotification(`⏱️ Descanso: ${mins}:${secs} • ${exName}`, {
+          body: `Próx: Série ${currentSerieNum}/${totalSeries} (${currentPeso}kg • ${currentReps} reps)`,
           icon: "/icon-192.png",
           badge: "/icon-192.png",
           tag: "workout-interactive-tracker",
           renotify: false,
+          silent: true,
           actions: [
             { action: 'skip_rest', title: '⏩ Pular' },
             { action: 'add_30s', title: '➕ +30s' }
@@ -320,12 +351,12 @@ export const ActiveWorkout: React.FC = () => {
       // Caso 2: Descanso Zerado (Aviso de hora da série)
       if (currentTime === 0) {
         await reg.showNotification(`🔔 Hora da Série ${currentSerieNum}/${totalSeries}!`, {
-          body: `${exName}: ${currentReps} reps com ${currentPeso}kg`,
+          body: `${exName}: ${currentReps} reps com ${currentPeso}kg • Toque para concluir`,
           icon: "/icon-192.png",
           badge: "/icon-192.png",
           tag: "workout-interactive-tracker",
           renotify: true,
-          vibrate: [350, 150, 350, 150, 500],
+          vibrate: [400, 200, 400, 200, 800],
           actions: [
             { action: `complete_set_${targetSlotIdx}_${uncompletedIdx !== -1 ? uncompletedIdx : 0}`, title: `✅ Concluir Série ${currentSerieNum}` },
             { action: 'add_30s', title: '⏱️ +30s' }
@@ -367,6 +398,18 @@ export const ActiveWorkout: React.FC = () => {
   // Áudio silencioso em segundo plano para impedir que navegadores móveis (Android/iOS) congelem o cronômetro ao alternar de app
   const startKeepAlive = () => {
     try {
+      if (!audioKeepAliveElRef.current) {
+        const audio = new Audio();
+        // Áudio WAV silencioso de 1 segundo em base64
+        audio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+        audio.loop = true;
+        audio.volume = 0.001;
+        audioKeepAliveElRef.current = audio;
+      }
+      audioKeepAliveElRef.current.play().catch(() => {});
+    } catch {}
+
+    try {
       if (silentKeepAliveRef.current) return;
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return;
@@ -389,6 +432,11 @@ export const ActiveWorkout: React.FC = () => {
   };
 
   const stopKeepAlive = () => {
+    try {
+      if (audioKeepAliveElRef.current) {
+        audioKeepAliveElRef.current.pause();
+      }
+    } catch {}
     try {
       if (silentKeepAliveRef.current) {
         silentKeepAliveRef.current.osc.stop();
@@ -436,7 +484,7 @@ export const ActiveWorkout: React.FC = () => {
     // 1. Vibração direta do dispositivo móvel
     if ("vibrate" in navigator) {
       try {
-        navigator.vibrate([350, 150, 350, 150, 500]);
+        navigator.vibrate([400, 200, 400, 200, 800]);
       } catch {}
     }
 
@@ -551,13 +599,13 @@ export const ActiveWorkout: React.FC = () => {
     }
   }, [timeLeft]);
 
-  const startTimer = (seconds: number) => {
+  const startTimer = (seconds: number, explicitExecData?: Record<string, ExercicioExecutado>) => {
     // Pedir permissão de notificação se disponível e ainda não configurada
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission()
         .then(res => {
           setNotifPermission(res);
-          if (res === 'granted') syncWorkoutNotification(seconds);
+          if (res === 'granted') syncWorkoutNotification(seconds, explicitExecData);
         })
         .catch(() => {});
     }
@@ -571,7 +619,62 @@ export const ActiveWorkout: React.FC = () => {
     } catch {}
     setTimeLeft(seconds);
     setTimerActive(true);
-    syncWorkoutNotification(seconds);
+
+    // Enviar dados para o Service Worker gerenciar o contador na notificação em segundo plano
+    const currentExecData = explicitExecData || execucaoDataRef.current;
+    const currentSlotIdx = activeSlotIndexRef.current ?? 0;
+    const currentTreino = treinoRef.current;
+    const currentAllExs = allExsRef.current;
+
+    if (currentTreino) {
+      let targetSlotIdx = currentSlotIdx;
+      let targetSlot = currentTreino.listaExercicios[targetSlotIdx];
+
+      if (targetSlot) {
+        const slotIds = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
+        const isSlotDone = slotIds.every(id => currentExecData[`${targetSlotIdx}-${id}`]?.concluido);
+        if (isSlotDone) {
+          const nextIncomplete = currentTreino.listaExercicios.findIndex((sl, idx) => {
+            const ids = typeof sl === 'string' ? [sl] : sl.ids;
+            return !ids.every(id => currentExecData[`${idx}-${id}`]?.concluido);
+          });
+          if (nextIncomplete !== -1) {
+            targetSlotIdx = nextIncomplete;
+            targetSlot = currentTreino.listaExercicios[targetSlotIdx];
+          }
+        }
+      }
+
+      if (targetSlot) {
+        const ids = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
+        const firstExId = ids[0];
+        const exName = ids.map(id => currentAllExs[id]?.nome || 'Exercício').join(' / ');
+        const seriesList = currentExecData[`${targetSlotIdx}-${firstExId}`]?.series || [];
+        const uncompletedIdx = seriesList.findIndex(s => !s.concluida);
+        const nextSerieNum = uncompletedIdx !== -1 ? uncompletedIdx + 1 : seriesList.length;
+        const totalSeries = seriesList.length;
+        const nextReps = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].reps : 10;
+        const nextPeso = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].peso : 0;
+        const targetSerieIdx = uncompletedIdx !== -1 ? uncompletedIdx : 0;
+
+        if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+          navigator.serviceWorker.controller.postMessage({
+            type: 'START_TIMER_COUNTDOWN',
+            targetEndTime: targetEnd,
+            duration: seconds,
+            exName: exName,
+            currentSerieNum: nextSerieNum,
+            totalSeries: totalSeries,
+            currentPeso: nextPeso,
+            currentReps: nextReps,
+            targetSlotIdx: targetSlotIdx,
+            targetSerieIdx: targetSerieIdx
+          });
+        }
+      }
+    }
+
+    syncWorkoutNotification(seconds, explicitExecData);
   };
   
   const stopTimer = () => {
@@ -585,6 +688,11 @@ export const ActiveWorkout: React.FC = () => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
+    }
+    if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'STOP_TIMER_COUNTDOWN'
+      });
     }
     syncWorkoutNotification(null);
   };
@@ -656,6 +764,78 @@ export const ActiveWorkout: React.FC = () => {
     }
   };
 
+  // Marcar explicitamente uma série como concluída (idempotente, usado por ações do smartwatch/notificações)
+  const completeSerieSlot = (slotIndex: number, sIndex: number) => {
+    const curTreino = treinoRef.current;
+    if (!curTreino) return;
+    const slot = curTreino.listaExercicios[slotIndex];
+    if (!slot) return;
+    const ids = typeof slot === 'string' ? [slot] : slot.ids;
+    const curAllExs = allExsRef.current;
+    
+    const firstKey = `${slotIndex}-${ids[0]}`;
+    const currentData = execucaoDataRef.current;
+    if (!currentData[firstKey] || !currentData[firstKey].series[sIndex]) return;
+
+    // Se a série já foi concluída, não faz nada (idempotente)
+    if (currentData[firstKey].series[sIndex].concluida) {
+      return;
+    }
+
+    // Verificar se devemos disparar cronômetro
+    let shouldStartTimer = false;
+    let timerDuration = 60;
+    const timerExId = ids.find(id => curAllExs[id]?.timerAtivo !== false);
+    if (timerExId) {
+      shouldStartTimer = true;
+      const dur = curAllExs[timerExId]?.timerPadrao;
+      timerDuration = typeof dur === 'number' && dur > 0 ? dur : 60;
+    }
+
+    const next = { ...currentData };
+    ids.forEach(exId => {
+      const key = `${slotIndex}-${exId}`;
+      if (next[key]) {
+        const newSeries = [...next[key].series];
+        if (newSeries[sIndex]) {
+          newSeries[sIndex] = { ...newSeries[sIndex], concluida: true };
+        }
+        next[key] = { ...next[key], series: newSeries };
+      }
+    });
+
+    const allSeriesDone = ids.every(id => next[`${slotIndex}-${id}`]?.series.every(s => s.concluida));
+
+    if (allSeriesDone) {
+      ids.forEach(id => { 
+        const key = `${slotIndex}-${id}`;
+        next[key] = { ...next[key], concluido: true };
+      });
+      setTimeout(() => {
+        setActiveSlotIndex(prev => {
+          if (prev === slotIndex && curTreino.listaExercicios[slotIndex + 1]) {
+            return slotIndex + 1;
+          }
+          return prev;
+        });
+      }, 400);
+    } else {
+      ids.forEach(id => { 
+        const key = `${slotIndex}-${id}`;
+        next[key] = { ...next[key], concluido: false };
+      });
+      // Mantém o exercício aberto para que o usuário veja a série marcada
+      setActiveSlotIndex(slotIndex);
+    }
+    
+    execucaoDataRef.current = next;
+    setExecucaoData(next);
+
+    if (shouldStartTimer) {
+      startTimer(timerDuration, next);
+    }
+  };
+
   const toggleSerieSlot = (slotIndex: number, sIndex: number) => {
     const curTreino = treinoRef.current;
     if (!curTreino) return;
@@ -682,55 +862,53 @@ export const ActiveWorkout: React.FC = () => {
       }
     }
 
-    setExecucaoData(prev => {
-      const next = { ...prev };
-      ids.forEach(exId => {
-        const key = `${slotIndex}-${exId}`;
-        if (next[key]) {
-          const newSeries = [...next[key].series];
-          if (newSeries[sIndex]) {
-            newSeries[sIndex] = { ...newSeries[sIndex], concluida: newState };
-          }
-          next[key] = { ...next[key], series: newSeries };
+    const next = { ...currentData };
+    ids.forEach(exId => {
+      const key = `${slotIndex}-${exId}`;
+      if (next[key]) {
+        const newSeries = [...next[key].series];
+        if (newSeries[sIndex]) {
+          newSeries[sIndex] = { ...newSeries[sIndex], concluida: newState };
         }
-      });
+        next[key] = { ...next[key], series: newSeries };
+      }
+    });
 
-      if (newState) {
-        const allSeriesDone = ids.every(id => next[`${slotIndex}-${id}`]?.series.every(s => s.concluida));
+    if (newState) {
+      const allSeriesDone = ids.every(id => next[`${slotIndex}-${id}`]?.series.every(s => s.concluida));
 
-        if (allSeriesDone) {
-          ids.forEach(id => { 
-            const key = `${slotIndex}-${id}`;
-            next[key] = { ...next[key], concluido: true };
+      if (allSeriesDone) {
+        ids.forEach(id => { 
+          const key = `${slotIndex}-${id}`;
+          next[key] = { ...next[key], concluido: true };
+        });
+        setTimeout(() => {
+          setActiveSlotIndex(prev => {
+            if (prev === slotIndex && curTreino.listaExercicios[slotIndex + 1]) {
+              return slotIndex + 1;
+            }
+            return prev;
           });
-          setTimeout(() => {
-            setActiveSlotIndex(prev => {
-              if (prev === slotIndex && curTreino.listaExercicios[slotIndex + 1]) {
-                return slotIndex + 1;
-              }
-              return prev;
-            });
-          }, 400);
-        } else {
-          ids.forEach(id => { 
-            const key = `${slotIndex}-${id}`;
-            next[key] = { ...next[key], concluido: false };
-          });
-        }
+        }, 400);
       } else {
         ids.forEach(id => { 
           const key = `${slotIndex}-${id}`;
           next[key] = { ...next[key], concluido: false };
         });
       }
-      
-      execucaoDataRef.current = next;
-      return next;
-    });
+    } else {
+      ids.forEach(id => { 
+        const key = `${slotIndex}-${id}`;
+        next[key] = { ...next[key], concluido: false };
+      });
+    }
+    
+    execucaoDataRef.current = next;
+    setExecucaoData(next);
 
     // Iniciar o cronômetro do descanso FORA do callback do setExecucaoData
     if (newState && shouldStartTimer) {
-      startTimer(timerDuration);
+      startTimer(timerDuration, next);
     }
   };
 
@@ -850,6 +1028,13 @@ export const ActiveWorkout: React.FC = () => {
 
   // Processar ações disparadas diretamente pelos botões do Smartwatch / Barra de Notificações
   const handleNotificationAction = (action: string) => {
+    const now = Date.now();
+    // Debounce para evitar cliques duplicados acidentais em menos de 700ms
+    if (now - lastActionTimestampRef.current < 700) {
+      return;
+    }
+    lastActionTimestampRef.current = now;
+
     if (action.startsWith('complete_set')) {
       const curTreino = treinoRef.current;
       if (!curTreino) return;
@@ -871,13 +1056,18 @@ export const ActiveWorkout: React.FC = () => {
         }
       }
 
-      // Se não veio índice específico ou precisa confirmar slot incompleto
-      if (targetSerieIdx === -1) {
-        let slot = curTreino.listaExercicios[targetSlotIdx];
-        if (slot) {
-          const slotIds = typeof slot === 'string' ? [slot] : slot.ids;
-          const isDone = slotIds.every(id => curExecData[`${targetSlotIdx}-${id}`]?.concluido);
-          if (isDone) {
+      // Se não veio índice específico ou se o índice especificado já estiver concluído
+      let slot = curTreino.listaExercicios[targetSlotIdx];
+      if (slot) {
+        const slotIds = typeof slot === 'string' ? [slot] : slot.ids;
+        const firstId = slotIds[0];
+        const seriesList = curExecData[`${targetSlotIdx}-${firstId}`]?.series || [];
+
+        // Se targetSerieIdx é inválido ou já está concluído, encontra a primeira série incompleta
+        if (targetSerieIdx === -1 || (seriesList[targetSerieIdx] && seriesList[targetSerieIdx].concluida)) {
+          // Checar se o slot todo já foi concluído
+          const isSlotDone = slotIds.every(id => curExecData[`${targetSlotIdx}-${id}`]?.concluido);
+          if (isSlotDone) {
             const nextIdx = curTreino.listaExercicios.findIndex((sl, idx) => {
               const ids = typeof sl === 'string' ? [sl] : sl.ids;
               return !ids.every(id => curExecData[`${idx}-${id}`]?.concluido);
@@ -887,18 +1077,18 @@ export const ActiveWorkout: React.FC = () => {
               slot = curTreino.listaExercicios[targetSlotIdx];
             }
           }
-        }
 
-        if (slot) {
-          const ids = typeof slot === 'string' ? [slot] : slot.ids;
-          const firstId = ids[0];
-          const seriesList = curExecData[`${targetSlotIdx}-${firstId}`]?.series || [];
-          targetSerieIdx = seriesList.findIndex(s => !s.concluida);
+          if (slot) {
+            const ids = typeof slot === 'string' ? [slot] : slot.ids;
+            const fId = ids[0];
+            const sList = curExecData[`${targetSlotIdx}-${fId}`]?.series || [];
+            targetSerieIdx = sList.findIndex(s => !s.concluida);
+          }
         }
       }
 
       if (targetSerieIdx !== -1) {
-        toggleSerieSlot(targetSlotIdx, targetSerieIdx);
+        completeSerieSlot(targetSlotIdx, targetSerieIdx);
       }
     } else if (action === 'skip_rest') {
       stopTimer();
@@ -919,8 +1109,21 @@ export const ActiveWorkout: React.FC = () => {
     if (!("serviceWorker" in navigator)) return;
 
     const onMessage = (event: MessageEvent) => {
-      if (event.data && event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
+      if (!event.data) return;
+      if (event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
         handleNotificationAction(event.data.action);
+      } else if (event.data.type === 'WORKOUT_TIMER_DONE') {
+        setTimeLeft(0);
+        setTimerActive(false);
+        targetEndTimeRef.current = null;
+        try {
+          sessionStorage.removeItem('active_workout_timer_end');
+        } catch {}
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+        notifyTimerComplete();
       }
     };
 
