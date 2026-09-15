@@ -4,6 +4,7 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../AuthContext';
 import { getTreinos, getExercicios, addExecucao, updateUserProfile, getLastExercicioData, saveSessaoAtiva, getSessaoAtiva, deleteSessaoAtiva, updateExercicio } from '../../services/dbService';
 import { Treino, Exercicio, ExercicioExecutado, SerieExecutada, TreinoSlot, SessaoAtiva } from '../../types';
+import { getStoredWorkoutSession, saveStoredWorkoutSession, clearStoredWorkoutSession, StoredWorkoutSession } from '../../services/workoutSync';
 import { Check, Square, Timer, Plus, Minus, X, ChevronDown, ChevronUp, Weight, Layers, Settings2, Save, AlertTriangle, FileText, Edit2, Bell, BellRing, BellOff, Watch, Sparkles, HelpCircle } from 'lucide-react';
 
 type ExtendedNotificationOptions = NotificationOptions & {
@@ -179,6 +180,20 @@ export const ActiveWorkout: React.FC = () => {
           setExecucaoData(initialExecData);
           setActiveSlotIndex(0);
           setDataInicio(new Date().toISOString());
+
+          if (user && t.id) {
+            saveStoredWorkoutSession({
+              treinoId: t.id,
+              treinoNome: t.nome,
+              treino: t,
+              allExs: exsMap,
+              execucaoData: initialExecData,
+              activeSlotIndex: 0,
+              dataInicio: new Date().toISOString(),
+              userId: user.uid,
+              lastUpdated: Date.now()
+            });
+          }
         }
         setIsInitialized(true);
       } catch (err) {
@@ -246,6 +261,53 @@ export const ActiveWorkout: React.FC = () => {
       }
     };
   }, []);
+
+  // Obter o tempo exato configurado pelo usuário para o exercício deste slot
+  const getSlotTimerInfo = (slotIndex: number): { duration: number; enabled: boolean } => {
+    const curTreino = treinoRef.current;
+    const curAllExs = allExsRef.current;
+    if (!curTreino) return { duration: 60, enabled: true };
+    const slot = curTreino.listaExercicios[slotIndex];
+    if (!slot) return { duration: 60, enabled: true };
+    const ids = typeof slot === 'string' ? [slot] : slot.ids;
+    
+    for (const exId of ids) {
+      const ex = curAllExs[exId];
+      if (ex) {
+        const enabled = ex.timerAtivo !== false;
+        const numDur = Number(ex.timerPadrao);
+        const duration = !isNaN(numDur) && numDur > 0 ? Math.round(numDur) : 60;
+        return { duration, enabled };
+      }
+    }
+    return { duration: 60, enabled: true };
+  };
+
+  // Sincronizar o estado da sessão com IndexedDB e o Service Worker
+  const syncSessionToLocalAndSW = (
+    updatedExecData: Record<string, ExercicioExecutado>,
+    slotIdx: number
+  ) => {
+    if (!treino || !user) return;
+    const session: StoredWorkoutSession = {
+      treinoId: treino.id!,
+      treinoNome: treino.nome,
+      treino: treino,
+      allExs: allExsRef.current,
+      execucaoData: updatedExecData,
+      activeSlotIndex: slotIdx,
+      dataInicio: dataInicio,
+      userId: user.uid,
+      lastUpdated: Date.now()
+    };
+    saveStoredWorkoutSession(session);
+    if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'SYNC_WORKOUT_STATE',
+        session
+      });
+    }
+  };
 
   const clearWorkoutNotification = async () => {
     try {
@@ -329,6 +391,10 @@ export const ActiveWorkout: React.FC = () => {
       const currentReps = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].reps : 10;
       const currentPeso = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].peso : 0;
 
+      // Obter duração configurada no exercício para o botão de repetir descanso
+      const { duration: exTimerDuration } = getSlotTimerInfo(targetSlotIdx);
+      const durLabel = `${exTimerDuration}s`;
+
       // Caso 1: Descanso Ativo (Contagem regressiva no relógio / barra)
       if (activeTimer && currentTime !== null && currentTime > 0) {
         const mins = Math.floor(currentTime / 60);
@@ -342,7 +408,7 @@ export const ActiveWorkout: React.FC = () => {
           silent: true,
           actions: [
             { action: 'skip_rest', title: '⏩ Pular' },
-            { action: 'add_30s', title: '➕ +30s' }
+            { action: 'repeat_rest', title: `➕ +${durLabel}` }
           ]
         } as ExtendedNotificationOptions);
         return;
@@ -359,7 +425,7 @@ export const ActiveWorkout: React.FC = () => {
           vibrate: [400, 200, 400, 200, 800],
           actions: [
             { action: `complete_set_${targetSlotIdx}_${uncompletedIdx !== -1 ? uncompletedIdx : 0}`, title: `✅ Concluir Série ${currentSerieNum}` },
-            { action: 'add_30s', title: '⏱️ +30s' }
+            { action: 'repeat_rest', title: `⏱️ +${durLabel}` }
           ]
         } as ExtendedNotificationOptions);
         return;
@@ -553,8 +619,32 @@ export const ActiveWorkout: React.FC = () => {
     // Verificação de alta frequência (500ms) para contagem visual suave
     timerRef.current = window.setInterval(checkTimerTick, 500);
 
-    const handleVisibilityOrFocus = () => {
+    // Sincronização e recuperação instantânea ao trocar de app / voltar da tela de bloqueio
+    const handleVisibilityOrFocus = async () => {
       checkTimerTick();
+      if (document.visibilityState === 'visible') {
+        const session = await getStoredWorkoutSession();
+        if (session && session.execucaoData && session.treinoId === id) {
+          execucaoDataRef.current = session.execucaoData;
+          setExecucaoData(session.execucaoData);
+          if (session.activeSlotIndex !== undefined) {
+            activeSlotIndexRef.current = session.activeSlotIndex;
+            setActiveSlotIndex(session.activeSlotIndex);
+          }
+          if (session.activeTimer && session.activeTimer.targetEndTime) {
+            const remaining = Math.ceil((session.activeTimer.targetEndTime - Date.now()) / 1000);
+            if (remaining > 0) {
+              targetEndTimeRef.current = session.activeTimer.targetEndTime;
+              setTimeLeft(remaining);
+              setTimerActive(true);
+            } else {
+              targetEndTimeRef.current = null;
+              setTimeLeft(0);
+              setTimerActive(false);
+            }
+          }
+        }
+      }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityOrFocus);
@@ -570,7 +660,7 @@ export const ActiveWorkout: React.FC = () => {
       window.removeEventListener('focus', handleVisibilityOrFocus);
       window.removeEventListener('pageshow', handleVisibilityOrFocus);
     };
-  }, [timerActive]);
+  }, [timerActive, id]);
 
   // Atualizar título da aba com o cronômetro para fácil acompanhamento em segundo plano
   useEffect(() => {
@@ -599,7 +689,7 @@ export const ActiveWorkout: React.FC = () => {
     }
   }, [timeLeft]);
 
-  const startTimer = (seconds: number, explicitExecData?: Record<string, ExercicioExecutado>) => {
+  const startTimer = (seconds: number, targetSlotIndex?: number, explicitExecData?: Record<string, ExercicioExecutado>) => {
     // Pedir permissão de notificação se disponível e ainda não configurada
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission()
@@ -622,25 +712,25 @@ export const ActiveWorkout: React.FC = () => {
 
     // Enviar dados para o Service Worker gerenciar o contador na notificação em segundo plano
     const currentExecData = explicitExecData || execucaoDataRef.current;
-    const currentSlotIdx = activeSlotIndexRef.current ?? 0;
+    const currentSlotIdx = targetSlotIndex !== undefined ? targetSlotIndex : (activeSlotIndexRef.current ?? 0);
     const currentTreino = treinoRef.current;
     const currentAllExs = allExsRef.current;
 
     if (currentTreino) {
-      let targetSlotIdx = currentSlotIdx;
-      let targetSlot = currentTreino.listaExercicios[targetSlotIdx];
+      let resolvedSlotIdx = currentSlotIdx;
+      let targetSlot = currentTreino.listaExercicios[resolvedSlotIdx];
 
       if (targetSlot) {
         const slotIds = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
-        const isSlotDone = slotIds.every(id => currentExecData[`${targetSlotIdx}-${id}`]?.concluido);
+        const isSlotDone = slotIds.every(id => currentExecData[`${resolvedSlotIdx}-${id}`]?.concluido);
         if (isSlotDone) {
           const nextIncomplete = currentTreino.listaExercicios.findIndex((sl, idx) => {
             const ids = typeof sl === 'string' ? [sl] : sl.ids;
             return !ids.every(id => currentExecData[`${idx}-${id}`]?.concluido);
           });
           if (nextIncomplete !== -1) {
-            targetSlotIdx = nextIncomplete;
-            targetSlot = currentTreino.listaExercicios[targetSlotIdx];
+            resolvedSlotIdx = nextIncomplete;
+            targetSlot = currentTreino.listaExercicios[resolvedSlotIdx];
           }
         }
       }
@@ -649,7 +739,7 @@ export const ActiveWorkout: React.FC = () => {
         const ids = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
         const firstExId = ids[0];
         const exName = ids.map(id => currentAllExs[id]?.nome || 'Exercício').join(' / ');
-        const seriesList = currentExecData[`${targetSlotIdx}-${firstExId}`]?.series || [];
+        const seriesList = currentExecData[`${resolvedSlotIdx}-${firstExId}`]?.series || [];
         const uncompletedIdx = seriesList.findIndex(s => !s.concluida);
         const nextSerieNum = uncompletedIdx !== -1 ? uncompletedIdx + 1 : seriesList.length;
         const totalSeries = seriesList.length;
@@ -662,12 +752,13 @@ export const ActiveWorkout: React.FC = () => {
             type: 'START_TIMER_COUNTDOWN',
             targetEndTime: targetEnd,
             duration: seconds,
+            timerDuration: seconds,
             exName: exName,
             currentSerieNum: nextSerieNum,
             totalSeries: totalSeries,
             currentPeso: nextPeso,
             currentReps: nextReps,
-            targetSlotIdx: targetSlotIdx,
+            targetSlotIdx: resolvedSlotIdx,
             targetSerieIdx: targetSerieIdx
           });
         }
@@ -771,7 +862,6 @@ export const ActiveWorkout: React.FC = () => {
     const slot = curTreino.listaExercicios[slotIndex];
     if (!slot) return;
     const ids = typeof slot === 'string' ? [slot] : slot.ids;
-    const curAllExs = allExsRef.current;
     
     const firstKey = `${slotIndex}-${ids[0]}`;
     const currentData = execucaoDataRef.current;
@@ -782,15 +872,8 @@ export const ActiveWorkout: React.FC = () => {
       return;
     }
 
-    // Verificar se devemos disparar cronômetro
-    let shouldStartTimer = false;
-    let timerDuration = 60;
-    const timerExId = ids.find(id => curAllExs[id]?.timerAtivo !== false);
-    if (timerExId) {
-      shouldStartTimer = true;
-      const dur = curAllExs[timerExId]?.timerPadrao;
-      timerDuration = typeof dur === 'number' && dur > 0 ? dur : 60;
-    }
+    // Obter o timer configurado no exercício
+    const { duration: timerDuration, enabled: shouldStartTimer } = getSlotTimerInfo(slotIndex);
 
     const next = { ...currentData };
     ids.forEach(exId => {
@@ -805,12 +888,16 @@ export const ActiveWorkout: React.FC = () => {
     });
 
     const allSeriesDone = ids.every(id => next[`${slotIndex}-${id}`]?.series.every(s => s.concluida));
+    let nextSlotIndex = slotIndex;
 
     if (allSeriesDone) {
       ids.forEach(id => { 
         const key = `${slotIndex}-${id}`;
         next[key] = { ...next[key], concluido: true };
       });
+      if (curTreino.listaExercicios[slotIndex + 1]) {
+        nextSlotIndex = slotIndex + 1;
+      }
       setTimeout(() => {
         setActiveSlotIndex(prev => {
           if (prev === slotIndex && curTreino.listaExercicios[slotIndex + 1]) {
@@ -830,9 +917,10 @@ export const ActiveWorkout: React.FC = () => {
     
     execucaoDataRef.current = next;
     setExecucaoData(next);
+    syncSessionToLocalAndSW(next, nextSlotIndex);
 
     if (shouldStartTimer) {
-      startTimer(timerDuration, next);
+      startTimer(timerDuration, slotIndex, next);
     }
   };
 
@@ -842,7 +930,6 @@ export const ActiveWorkout: React.FC = () => {
     const slot = curTreino.listaExercicios[slotIndex];
     if (!slot) return;
     const ids = typeof slot === 'string' ? [slot] : slot.ids;
-    const curAllExs = allExsRef.current;
     
     const firstKey = `${slotIndex}-${ids[0]}`;
     const currentData = execucaoDataRef.current;
@@ -850,17 +937,9 @@ export const ActiveWorkout: React.FC = () => {
 
     const newState = !currentData[firstKey].series[sIndex].concluida;
 
-    // Verificar se devemos disparar cronômetro
-    let shouldStartTimer = false;
-    let timerDuration = 60;
-    if (newState) {
-      const timerExId = ids.find(id => curAllExs[id]?.timerAtivo !== false);
-      if (timerExId) {
-        shouldStartTimer = true;
-        const dur = curAllExs[timerExId]?.timerPadrao;
-        timerDuration = typeof dur === 'number' && dur > 0 ? dur : 60;
-      }
-    }
+    // Verificar se devemos disparar cronômetro com o tempo exato do exercício
+    const { duration: timerDuration, enabled: timerEnabled } = getSlotTimerInfo(slotIndex);
+    const shouldStartTimer = newState && timerEnabled;
 
     const next = { ...currentData };
     ids.forEach(exId => {
@@ -874,6 +953,7 @@ export const ActiveWorkout: React.FC = () => {
       }
     });
 
+    let nextSlotIndex = slotIndex;
     if (newState) {
       const allSeriesDone = ids.every(id => next[`${slotIndex}-${id}`]?.series.every(s => s.concluida));
 
@@ -882,6 +962,9 @@ export const ActiveWorkout: React.FC = () => {
           const key = `${slotIndex}-${id}`;
           next[key] = { ...next[key], concluido: true };
         });
+        if (curTreino.listaExercicios[slotIndex + 1]) {
+          nextSlotIndex = slotIndex + 1;
+        }
         setTimeout(() => {
           setActiveSlotIndex(prev => {
             if (prev === slotIndex && curTreino.listaExercicios[slotIndex + 1]) {
@@ -905,10 +988,11 @@ export const ActiveWorkout: React.FC = () => {
     
     execucaoDataRef.current = next;
     setExecucaoData(next);
+    syncSessionToLocalAndSW(next, nextSlotIndex);
 
     // Iniciar o cronômetro do descanso FORA do callback do setExecucaoData
     if (newState && shouldStartTimer) {
-      startTimer(timerDuration, next);
+      startTimer(timerDuration, slotIndex, next);
     }
   };
 
@@ -998,6 +1082,11 @@ export const ActiveWorkout: React.FC = () => {
       });
       await updateUserProfile(user.uid, { ultimoTreinoRealizado: treino.id });
       await deleteSessaoAtiva(user.uid);
+      await clearStoredWorkoutSession();
+
+      if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_WORKOUT_SESSION' });
+      }
 
       // Marcação para evitar que o botão de voltar do celular reabra o treino já encerrado
       try {
@@ -1092,12 +1181,15 @@ export const ActiveWorkout: React.FC = () => {
       }
     } else if (action === 'skip_rest') {
       stopTimer();
-    } else if (action === 'add_30s') {
-      if (targetEndTimeRef.current) {
-        targetEndTimeRef.current += 30000;
+      syncWorkoutNotification();
+    } else if (action === 'repeat_rest' || action === 'add_rest_time' || action === 'add_30s') {
+      const curSlot = activeSlotIndexRef.current ?? 0;
+      const { duration: dur } = getSlotTimerInfo(curSlot);
+      if (targetEndTimeRef.current && timerActiveRef.current) {
+        targetEndTimeRef.current += dur * 1000;
         checkTimerTick();
       } else {
-        startTimer(30);
+        startTimer(dur, curSlot);
       }
     } else if (action === 'finish_workout') {
       handleEncerrarTreino();
@@ -1110,7 +1202,25 @@ export const ActiveWorkout: React.FC = () => {
 
     const onMessage = (event: MessageEvent) => {
       if (!event.data) return;
-      if (event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
+      if (event.data.type === 'WORKOUT_STATE_UPDATED') {
+        const session = event.data.session;
+        if (session && session.execucaoData && session.treinoId === id) {
+          execucaoDataRef.current = session.execucaoData;
+          setExecucaoData(session.execucaoData);
+          if (session.activeSlotIndex !== undefined) {
+            activeSlotIndexRef.current = session.activeSlotIndex;
+            setActiveSlotIndex(session.activeSlotIndex);
+          }
+          if (session.activeTimer && session.activeTimer.targetEndTime) {
+            const remaining = Math.ceil((session.activeTimer.targetEndTime - Date.now()) / 1000);
+            if (remaining > 0) {
+              targetEndTimeRef.current = session.activeTimer.targetEndTime;
+              setTimeLeft(remaining);
+              setTimerActive(true);
+            }
+          }
+        }
+      } else if (event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
         handleNotificationAction(event.data.action);
       } else if (event.data.type === 'WORKOUT_TIMER_DONE') {
         setTimeLeft(0);
@@ -1131,7 +1241,7 @@ export const ActiveWorkout: React.FC = () => {
     return () => {
       navigator.serviceWorker.removeEventListener('message', onMessage);
     };
-  }, [treino, allExs]);
+  }, [id, treino, allExs]);
 
   // Sincronizar o exercício atual e série ativa com o Smartwatch / Notificação enquanto não estiver descansando
   useEffect(() => {
