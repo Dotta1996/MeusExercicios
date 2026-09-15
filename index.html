@@ -81,9 +81,12 @@
     <script>
       if ('serviceWorker' in navigator && window.location.protocol === 'https:') {
         window.addEventListener('load', () => {
-          // Usamos caminho relativo para evitar erro de Cross-Origin
           navigator.serviceWorker.register('./sw.js')
-            .then(reg => console.log('SW registrado'))
+            .then(reg => {
+              // Força verificação imediata de nova versão do sw.js
+              reg.update();
+              console.log('SW registrado e verificado');
+            })
             .catch(err => console.warn('SW falhou (comum em sandbox):', err.message));
         });
       }

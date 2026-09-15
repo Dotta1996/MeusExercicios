@@ -1,4 +1,4 @@
-const CACHE_NAME = 'meusex-v1.5.2';
+const CACHE_NAME = 'meusex-v1.5.3';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
@@ -102,10 +102,9 @@ const notifyClients = (payload) => {
 // Renderizar notificação de descanso durante a contagem regressiva
 const renderTimerNotification = async (remainingSecs) => {
   if (!activeTimerData) return;
-  const { exName, currentSerieNum, totalSeries, currentPeso, currentReps, timerDuration } = activeTimerData;
+  const { exName, currentSerieNum, totalSeries, currentPeso, currentReps } = activeTimerData;
   const mins = Math.floor(remainingSecs / 60);
   const secs = (remainingSecs % 60).toString().padStart(2, '0');
-  const durLabel = timerDuration ? `${timerDuration}s` : 'Tempo';
 
   try {
     await self.registration.showNotification(`⏱️ Descanso: ${mins}:${secs} • ${exName}`, {
@@ -116,8 +115,7 @@ const renderTimerNotification = async (remainingSecs) => {
       renotify: false,
       silent: true,
       actions: [
-        { action: 'skip_rest', title: '⏩ Pular' },
-        { action: 'repeat_rest', title: `➕ +${durLabel}` }
+        { action: 'skip_rest', title: '⏩ Pular Descanso' }
       ]
     });
   } catch (err) {
@@ -150,8 +148,7 @@ const handleTimerZero = async () => {
     ? data.targetSerieIdx
     : ((data.serieIndex !== undefined && !isNaN(data.serieIndex)) ? data.serieIndex : 0);
 
-  const { exName, currentSerieNum, totalSeries, currentPeso, currentReps, timerDuration } = data;
-  const durLabel = timerDuration ? `${timerDuration}s` : 'Tempo';
+  const { exName, currentSerieNum, totalSeries, currentPeso, currentReps } = data;
 
   try {
     await self.registration.showNotification(`🔔 Hora da Série ${currentSerieNum}/${totalSeries}!`, {
@@ -163,8 +160,7 @@ const handleTimerZero = async () => {
       requireInteraction: true,
       vibrate: [400, 200, 400, 200, 800],
       actions: [
-        { action: `complete_set_${targetSlotIdx}_${targetSerieIdx}`, title: `✅ Concluir Série ${currentSerieNum}` },
-        { action: 'repeat_rest', title: `⏱️ +${durLabel}` }
+        { action: `complete_set_${targetSlotIdx}_${targetSerieIdx}`, title: `✅ Concluir Série ${currentSerieNum}` }
       ]
     });
   } catch (err) {
@@ -513,8 +509,7 @@ self.addEventListener('notificationclick', (event) => {
             requireInteraction: true,
             vibrate: [350, 150, 350, 150, 500],
             actions: [
-              { action: `complete_set_${sSlot}_${sSerie}`, title: `✅ Concluir Série ${data.currentSerieNum}` },
-              { action: 'repeat_rest', title: `⏱️ +${durLabel}` }
+              { action: `complete_set_${sSlot}_${sSerie}`, title: `✅ Concluir Série ${data.currentSerieNum}` }
             ]
           });
         }

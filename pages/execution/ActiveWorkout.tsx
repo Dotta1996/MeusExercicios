@@ -314,11 +314,27 @@ export const ActiveWorkout: React.FC = () => {
   };
 
   // Sincronizar o estado da sessão com IndexedDB e o Service Worker
-  const syncSessionToLocalAndSW = (
+  const syncSessionToLocalAndSW = async (
     updatedExecData: Record<string, ExercicioExecutado>,
     slotIdx: number
   ) => {
     if (!treino || !user) return;
+
+    let currentTimer: StoredWorkoutSession['activeTimer'] = null;
+    if (targetEndTimeRef.current && targetEndTimeRef.current > Date.now()) {
+      currentTimer = {
+        targetEndTime: targetEndTimeRef.current,
+        slotIndex: slotIdx
+      };
+    } else {
+      try {
+        const stored = await getStoredWorkoutSession();
+        if (stored && stored.activeTimer && stored.activeTimer.targetEndTime && stored.activeTimer.targetEndTime > Date.now()) {
+          currentTimer = stored.activeTimer;
+        }
+      } catch {}
+    }
+
     const session: StoredWorkoutSession = {
       treinoId: treino.id!,
       treinoNome: treino.nome,
@@ -328,6 +344,7 @@ export const ActiveWorkout: React.FC = () => {
       activeSlotIndex: slotIdx,
       dataInicio: dataInicio,
       userId: user.uid,
+      activeTimer: currentTimer,
       lastUpdated: Date.now()
     };
     saveStoredWorkoutSession(session);
@@ -337,14 +354,6 @@ export const ActiveWorkout: React.FC = () => {
         session
       });
     }
-    try {
-      const bc = new BroadcastChannel('workout_sync_channel');
-      bc.postMessage({
-        type: 'WORKOUT_STATE_UPDATED',
-        session
-      });
-      bc.close();
-    } catch (e) {}
   };
 
   const clearWorkoutNotification = async () => {
@@ -445,37 +454,19 @@ export const ActiveWorkout: React.FC = () => {
           renotify: false,
           silent: true,
           actions: [
-            { action: 'skip_rest', title: '⏩ Pular' },
-            { action: 'repeat_rest', title: `➕ +${durLabel}` }
+            { action: 'skip_rest', title: '⏩ Pular Descanso' }
           ]
         } as ExtendedNotificationOptions);
         return;
       }
 
-      // Caso 2: Descanso Zerado (Aviso de hora da série)
-      if (currentTime === 0) {
-        await reg.showNotification(`🔔 Hora da Série ${currentSerieNum}/${totalSeries}!`, {
-          body: `${exName}: ${currentReps} reps com ${currentPeso}kg • Toque para concluir`,
-          icon: "/icon-192.png",
-          badge: "/icon-192.png",
-          tag: "workout-interactive-tracker",
-          renotify: true,
-          vibrate: [400, 200, 400, 200, 800],
-          actions: [
-            { action: `complete_set_${targetSlotIdx}_${uncompletedIdx !== -1 ? uncompletedIdx : 0}`, title: `✅ Concluir Série ${currentSerieNum}` },
-            { action: 'repeat_rest', title: `⏱️ +${durLabel}` }
-          ]
-        } as ExtendedNotificationOptions);
-        return;
-      }
-
-      // Caso 3: Executando Série (Aguardando conclusão pelo relógio ou app)
-      await reg.showNotification(`🏋️ ${exName} (${currentSerieNum}/${totalSeries})`, {
-        body: `${currentReps} reps • ${currentPeso}kg | Toque abaixo no relógio ao concluir`,
+      // Caso 2: Executando Série ou descanso concluído (Aguardando conclusão pelo relógio ou app)
+      await reg.showNotification(`🔔 Série ${currentSerieNum}/${totalSeries} • ${exName}`, {
+        body: `${currentReps} reps • ${currentPeso}kg | Toque abaixo ao concluir`,
         icon: "/icon-192.png",
         badge: "/icon-192.png",
         tag: "workout-interactive-tracker",
-        renotify: false,
+        renotify: currentTime === 0,
         actions: [
           { action: `complete_set_${targetSlotIdx}_${uncompletedIdx !== -1 ? uncompletedIdx : 0}`, title: `✅ Concluir Série ${currentSerieNum}` }
         ]
@@ -593,7 +584,7 @@ export const ActiveWorkout: React.FC = () => {
     }
 
     // 2. Disparo na barra de notificações e relógio com botões interativos
-    syncWorkoutNotification(0);
+    syncWorkoutNotification(null);
   };
 
   const checkTimerTick = () => {
@@ -603,7 +594,7 @@ export const ActiveWorkout: React.FC = () => {
     const remainingSecs = Math.max(0, Math.ceil(remainingMs / 1000));
 
     if (remainingSecs <= 0) {
-      setTimeLeft(0);
+      setTimeLeft(null);
       setTimerActive(false);
       targetEndTimeRef.current = null;
       try {
@@ -677,7 +668,7 @@ export const ActiveWorkout: React.FC = () => {
               setTimerActive(true);
             } else {
               targetEndTimeRef.current = null;
-              setTimeLeft(0);
+              setTimeLeft(null);
               setTimerActive(false);
             }
           }
@@ -824,6 +815,20 @@ export const ActiveWorkout: React.FC = () => {
       });
     }
     syncWorkoutNotification(null);
+  };
+
+  const stopTimerSilently = () => {
+    stopKeepAlive();
+    setTimerActive(false);
+    setTimeLeft(null);
+    targetEndTimeRef.current = null;
+    try {
+      sessionStorage.removeItem('active_workout_timer_end');
+    } catch {}
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
   };
 
   const toggleExpandSlot = (index: number) => {
@@ -1069,7 +1074,7 @@ export const ActiveWorkout: React.FC = () => {
           setTimerActive(true);
         } else {
           targetEndTimeRef.current = null;
-          setTimeLeft(0);
+          setTimeLeft(null);
           setTimerActive(false);
         }
       } else if (session.activeTimer === null) {
@@ -1084,13 +1089,10 @@ export const ActiveWorkout: React.FC = () => {
       if (event.data.type === 'WORKOUT_STATE_UPDATED' && event.data.session) {
         handleRemoteSessionUpdate(event.data.session);
       } else if (event.data.type === 'WORKOUT_TIMER_DONE') {
-        stopTimer();
+        stopTimerSilently();
       } else if (event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
         if (event.data.action === 'skip_rest') {
-          stopTimer();
-        } else if (event.data.action === 'repeat_rest') {
-          const dur = event.data.duration || 60;
-          startTimer(dur);
+          stopTimerSilently();
         }
       }
     };
@@ -1102,12 +1104,10 @@ export const ActiveWorkout: React.FC = () => {
         if (event.data?.type === 'WORKOUT_STATE_UPDATED' && event.data.session) {
           handleRemoteSessionUpdate(event.data.session);
         } else if (event.data?.type === 'WORKOUT_TIMER_DONE') {
-          stopTimer();
+          stopTimerSilently();
         } else if (event.data?.type === 'WORKOUT_NOTIFICATION_ACTION') {
           if (event.data.action === 'skip_rest') {
-            stopTimer();
-          } else if (event.data.action === 'repeat_rest') {
-            startTimer(event.data.duration || 60);
+            stopTimerSilently();
           }
         }
       };
