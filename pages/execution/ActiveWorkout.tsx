@@ -969,6 +969,12 @@ export const ActiveWorkout: React.FC = () => {
   };
 
   const toggleSerieSlot = (slotIndex: number, sIndex: number) => {
+    const now = Date.now();
+    if (now - lastActionTimestampRef.current < 300) {
+      return;
+    }
+    lastActionTimestampRef.current = now;
+
     const curTreino = treinoRef.current;
     if (!curTreino) return;
     const slot = curTreino.listaExercicios[slotIndex];
@@ -1077,16 +1083,14 @@ export const ActiveWorkout: React.FC = () => {
       if (!event.data) return;
       if (event.data.type === 'WORKOUT_STATE_UPDATED' && event.data.session) {
         handleRemoteSessionUpdate(event.data.session);
+      } else if (event.data.type === 'WORKOUT_TIMER_DONE') {
+        stopTimer();
       } else if (event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
         if (event.data.action === 'skip_rest') {
           stopTimer();
         } else if (event.data.action === 'repeat_rest') {
           const dur = event.data.duration || 60;
           startTimer(dur);
-        } else if (event.data.action === 'complete_set') {
-          if (event.data.slotIdx !== undefined && event.data.serieIdx !== undefined) {
-            completeSerieSlot(event.data.slotIdx, event.data.serieIdx);
-          }
         }
       }
     };
@@ -1097,15 +1101,13 @@ export const ActiveWorkout: React.FC = () => {
       bc.onmessage = (event) => {
         if (event.data?.type === 'WORKOUT_STATE_UPDATED' && event.data.session) {
           handleRemoteSessionUpdate(event.data.session);
+        } else if (event.data?.type === 'WORKOUT_TIMER_DONE') {
+          stopTimer();
         } else if (event.data?.type === 'WORKOUT_NOTIFICATION_ACTION') {
           if (event.data.action === 'skip_rest') {
             stopTimer();
           } else if (event.data.action === 'repeat_rest') {
             startTimer(event.data.duration || 60);
-          } else if (event.data.action === 'complete_set') {
-            if (event.data.slotIdx !== undefined && event.data.serieIdx !== undefined) {
-              completeSerieSlot(event.data.slotIdx, event.data.serieIdx);
-            }
           }
         }
       };

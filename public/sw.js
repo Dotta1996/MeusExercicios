@@ -1,4 +1,4 @@
-const CACHE_NAME = 'meusex-v1.5.1';
+const CACHE_NAME = 'meusex-v1.5.2';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
@@ -130,8 +130,27 @@ const handleTimerZero = async () => {
   const data = activeTimerData ? { ...activeTimerData } : null;
   clearActiveTimer();
 
+  // Limpa o timer na sessão salva no IndexedDB e notifica os clientes
+  try {
+    const session = await getStoredSession();
+    if (session) {
+      session.activeTimer = null;
+      await saveStoredSession(session);
+      notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
+    }
+  } catch (e) {}
+
   if (!data) return;
-  const { exName, currentSerieNum, totalSeries, currentPeso, currentReps, targetSlotIdx, targetSerieIdx, timerDuration } = data;
+
+  const targetSlotIdx = (data.targetSlotIdx !== undefined && !isNaN(data.targetSlotIdx))
+    ? data.targetSlotIdx
+    : ((data.slotIndex !== undefined && !isNaN(data.slotIndex)) ? data.slotIndex : 0);
+
+  const targetSerieIdx = (data.targetSerieIdx !== undefined && !isNaN(data.targetSerieIdx))
+    ? data.targetSerieIdx
+    : ((data.serieIndex !== undefined && !isNaN(data.serieIndex)) ? data.serieIndex : 0);
+
+  const { exName, currentSerieNum, totalSeries, currentPeso, currentReps, timerDuration } = data;
   const durLabel = timerDuration ? `${timerDuration}s` : 'Tempo';
 
   try {
@@ -208,7 +227,27 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
   }
 
   const { treino, execucaoData } = session;
-  let targetSlotIdx = slotIdx;
+  
+  // Resolução segura do slotIdx (trata NaN, undefined ou fora dos limites)
+  let targetSlotIdx = (slotIdx !== undefined && !isNaN(slotIdx) && slotIdx >= 0 && slotIdx < treino.listaExercicios.length)
+    ? slotIdx
+    : (session.activeSlotIndex !== undefined && !isNaN(session.activeSlotIndex) ? session.activeSlotIndex : 0);
+
+  const isSlotIncomplete = (sIdx) => {
+    const sl = treino.listaExercicios[sIdx];
+    if (!sl) return false;
+    const sIds = typeof sl === 'string' ? [sl] : sl.ids;
+    return !sIds.every(id => execucaoData[`${sIdx}-${id}`]?.concluido);
+  };
+
+  // Se o slot indicado já estiver concluído ou inexistente, encontra o primeiro com pendências
+  if (!isSlotIncomplete(targetSlotIdx)) {
+    const firstPendingSlot = treino.listaExercicios.findIndex((_, idx) => isSlotIncomplete(idx));
+    if (firstPendingSlot !== -1) {
+      targetSlotIdx = firstPendingSlot;
+    }
+  }
+
   let slot = treino.listaExercicios[targetSlotIdx];
   if (!slot) return;
   let ids = typeof slot === 'string' ? [slot] : slot.ids;
@@ -218,25 +257,11 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
   const firstSlotSeries = execucaoData[`${targetSlotIdx}-${firstId}`]?.series || [];
   let targetSerieIdx = serieIdx;
 
-  // Se a série passada já estiver concluída ou fora dos limites, busca a primeira pendente no slot
-  if (targetSerieIdx < 0 || targetSerieIdx >= firstSlotSeries.length || firstSlotSeries[targetSerieIdx]?.concluida) {
+  // Se a série passada for inválida, já estiver concluída ou fora dos limites, busca a primeira pendente no slot
+  if (targetSerieIdx === undefined || isNaN(targetSerieIdx) || targetSerieIdx < 0 || targetSerieIdx >= firstSlotSeries.length || firstSlotSeries[targetSerieIdx]?.concluida) {
     const pendingIdx = firstSlotSeries.findIndex(s => !s.concluida);
     if (pendingIdx !== -1) {
       targetSerieIdx = pendingIdx;
-    } else {
-      // Se todas as séries deste slot já foram concluídas, localiza o próximo slot com séries pendentes
-      const nextPendingSlot = treino.listaExercicios.findIndex((sl, idx) => {
-        const sIds = typeof sl === 'string' ? [sl] : sl.ids;
-        return !sIds.every(id => execucaoData[`${idx}-${id}`]?.concluido);
-      });
-      if (nextPendingSlot !== -1) {
-        targetSlotIdx = nextPendingSlot;
-        slot = treino.listaExercicios[targetSlotIdx];
-        ids = typeof slot === 'string' ? [slot] : slot.ids;
-        firstId = ids[0];
-        const nextSeries = execucaoData[`${targetSlotIdx}-${firstId}`]?.series || [];
-        targetSerieIdx = nextSeries.findIndex(s => !s.concluida);
-      }
     }
   }
 
@@ -335,13 +360,6 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
     session.activeTimer = null;
     await saveStoredSession(session);
     notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
-    notifyClients({
-      type: 'WORKOUT_NOTIFICATION_ACTION',
-      action: 'complete_set',
-      slotIdx: targetSlotIdx,
-      serieIdx: targetSerieIdx,
-      timestamp: Date.now()
-    });
 
     await self.registration.showNotification("🎉 Treino Concluído!", {
       body: "Todas as séries foram finalizadas! Toque para salvar e encerrar.",
@@ -364,25 +382,20 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
     const activeTimer = {
       targetEndTime: targetEnd,
       duration: timerDuration,
+      timerDuration: timerDuration,
       slotIndex: nextSlotIdx,
+      targetSlotIdx: nextSlotIdx,
       serieIndex: nextSerieIdx,
+      targetSerieIdx: nextSerieIdx,
       exName: nextExName,
       currentSerieNum: nextSerieIdx + 1,
       totalSeries: totalSeries,
       currentPeso: nextPeso,
-      currentReps: nextReps,
-      timerDuration: timerDuration
+      currentReps: nextReps
     };
     session.activeTimer = activeTimer;
     await saveStoredSession(session);
     notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
-    notifyClients({
-      type: 'WORKOUT_NOTIFICATION_ACTION',
-      action: 'complete_set',
-      slotIdx: targetSlotIdx,
-      serieIdx: targetSerieIdx,
-      timestamp: Date.now()
-    });
 
     startSWTimer(activeTimer);
   } else {
@@ -391,13 +404,6 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
     session.activeTimer = null;
     await saveStoredSession(session);
     notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
-    notifyClients({
-      type: 'WORKOUT_NOTIFICATION_ACTION',
-      action: 'complete_set',
-      slotIdx: targetSlotIdx,
-      serieIdx: targetSerieIdx,
-      timestamp: Date.now()
-    });
 
     await self.registration.showNotification(`🏋️ ${nextExName} (${nextSerieIdx + 1}/${totalSeries})`, {
       body: `${nextReps} reps • ${nextPeso}kg | Toque abaixo ao concluir`,
@@ -486,9 +492,17 @@ self.addEventListener('notificationclick', (event) => {
         if (session) {
           session.activeTimer = null;
           await saveStoredSession(session);
+          notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
         }
 
         if (data) {
+          const sSlot = (data.targetSlotIdx !== undefined && !isNaN(data.targetSlotIdx))
+            ? data.targetSlotIdx
+            : ((data.slotIndex !== undefined && !isNaN(data.slotIndex)) ? data.slotIndex : 0);
+          const sSerie = (data.targetSerieIdx !== undefined && !isNaN(data.targetSerieIdx))
+            ? data.targetSerieIdx
+            : ((data.serieIndex !== undefined && !isNaN(data.serieIndex)) ? data.serieIndex : 0);
+
           const durLabel = data.timerDuration ? `${data.timerDuration}s` : 'Tempo';
           await self.registration.showNotification(`🔔 Hora da Série ${data.currentSerieNum}/${data.totalSeries}!`, {
             body: `${data.exName}: ${data.currentReps} reps com ${data.currentPeso}kg • Toque para concluir`,
@@ -499,7 +513,7 @@ self.addEventListener('notificationclick', (event) => {
             requireInteraction: true,
             vibrate: [350, 150, 350, 150, 500],
             actions: [
-              { action: `complete_set_${data.targetSlotIdx}_${data.targetSerieIdx}`, title: `✅ Concluir Série ${data.currentSerieNum}` },
+              { action: `complete_set_${sSlot}_${sSerie}`, title: `✅ Concluir Série ${data.currentSerieNum}` },
               { action: 'repeat_rest', title: `⏱️ +${durLabel}` }
             ]
           });
