@@ -83,8 +83,17 @@
         window.addEventListener('load', () => {
           navigator.serviceWorker.register('./sw.js')
             .then(reg => {
-              // Força verificação imediata de nova versão do sw.js
               reg.update();
+              reg.addEventListener('updatefound', () => {
+                const newWorker = reg.installing;
+                if (newWorker) {
+                  newWorker.addEventListener('statechange', () => {
+                    if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                      newWorker.postMessage({ type: 'SKIP_WAITING' });
+                    }
+                  });
+                }
+              });
               console.log('SW registrado e verificado');
             })
             .catch(err => console.warn('SW falhou (comum em sandbox):', err.message));

@@ -47,6 +47,7 @@ export const ActiveWorkout: React.FC = () => {
   const timerActiveRef = useRef(timerActive);
   const watchModeEnabledRef = useRef(watchModeEnabled);
   const allExsRef = useRef(allExs);
+  const handleEncerrarTreinoRef = useRef<() => void>(() => {});
 
   useEffect(() => { execucaoDataRef.current = execucaoData; }, [execucaoData]);
   useEffect(() => { activeSlotIndexRef.current = activeSlotIndex; }, [activeSlotIndex]);
@@ -438,10 +439,6 @@ export const ActiveWorkout: React.FC = () => {
       const currentReps = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].reps : 10;
       const currentPeso = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].peso : 0;
 
-      // Obter duração configurada no exercício para o botão de repetir descanso
-      const { duration: exTimerDuration } = getSlotTimerInfo(targetSlotIdx);
-      const durLabel = `${exTimerDuration}s`;
-
       // Caso 1: Descanso Ativo (Contagem regressiva no relógio / barra)
       if (activeTimer && currentTime !== null && currentTime > 0) {
         const mins = Math.floor(currentTime / 60);
@@ -453,6 +450,9 @@ export const ActiveWorkout: React.FC = () => {
           tag: "workout-interactive-tracker",
           renotify: false,
           silent: true,
+          data: {
+            type: 'skip_rest'
+          },
           actions: [
             { action: 'skip_rest', title: '⏩ Pular Descanso' }
           ]
@@ -461,14 +461,20 @@ export const ActiveWorkout: React.FC = () => {
       }
 
       // Caso 2: Executando Série ou descanso concluído (Aguardando conclusão pelo relógio ou app)
+      const targetSerie = uncompletedIdx !== -1 ? uncompletedIdx : 0;
       await reg.showNotification(`🔔 Série ${currentSerieNum}/${totalSeries} • ${exName}`, {
         body: `${currentReps} reps • ${currentPeso}kg | Toque abaixo ao concluir`,
         icon: "/icon-192.png",
         badge: "/icon-192.png",
         tag: "workout-interactive-tracker",
-        renotify: currentTime === 0,
+        renotify: true,
+        data: {
+          type: 'complete_set',
+          slotIdx: targetSlotIdx,
+          serieIdx: targetSerie
+        },
         actions: [
-          { action: `complete_set_${targetSlotIdx}_${uncompletedIdx !== -1 ? uncompletedIdx : 0}`, title: `✅ Concluir Série ${currentSerieNum}` }
+          { action: `complete_set_${targetSlotIdx}_${targetSerie}`, title: `✅ Concluir Série ${currentSerieNum}` }
         ]
       } as ExtendedNotificationOptions);
 
@@ -594,9 +600,11 @@ export const ActiveWorkout: React.FC = () => {
     const remainingSecs = Math.max(0, Math.ceil(remainingMs / 1000));
 
     if (remainingSecs <= 0) {
+      timerActiveRef.current = false;
+      timeLeftRef.current = null;
+      targetEndTimeRef.current = null;
       setTimeLeft(null);
       setTimerActive(false);
-      targetEndTimeRef.current = null;
       try {
         sessionStorage.removeItem('active_workout_timer_end');
       } catch {}
@@ -698,8 +706,6 @@ export const ActiveWorkout: React.FC = () => {
       const mins = Math.floor(timeLeft / 60);
       const secs = (timeLeft % 60).toString().padStart(2, '0');
       document.title = `⏱️ ${mins}:${secs} - ${treino?.nome || 'Treino'}`;
-    } else if (timeLeft === 0) {
-      document.title = `🔔 Descanso Concluído! - ${treino?.nome || 'Treino'}`;
     } else if (treino?.nome) {
       document.title = `${treino.nome} - Treino Ativo`;
     }
@@ -707,16 +713,6 @@ export const ActiveWorkout: React.FC = () => {
       document.title = originalTitle;
     };
   }, [timeLeft, treino?.nome]);
-
-  // Se o tempo zerou, limpar aviso após alguns segundos
-  useEffect(() => {
-    if (timeLeft === 0) {
-      const timeout = setTimeout(() => {
-        setTimeLeft(null);
-      }, 5000);
-      return () => clearTimeout(timeout);
-    }
-  }, [timeLeft]);
 
   const startTimer = (seconds: number, targetSlotIndex?: number, explicitExecData?: Record<string, ExercicioExecutado>) => {
     // Pedir permissão de notificação se disponível e ainda não configurada
@@ -799,9 +795,11 @@ export const ActiveWorkout: React.FC = () => {
   
   const stopTimer = () => {
     stopKeepAlive();
+    timerActiveRef.current = false;
+    timeLeftRef.current = null;
+    targetEndTimeRef.current = null;
     setTimerActive(false);
     setTimeLeft(null);
-    targetEndTimeRef.current = null;
     try {
       sessionStorage.removeItem('active_workout_timer_end');
     } catch {}
@@ -819,9 +817,11 @@ export const ActiveWorkout: React.FC = () => {
 
   const stopTimerSilently = () => {
     stopKeepAlive();
+    timerActiveRef.current = false;
+    timeLeftRef.current = null;
+    targetEndTimeRef.current = null;
     setTimerActive(false);
     setTimeLeft(null);
-    targetEndTimeRef.current = null;
     try {
       sessionStorage.removeItem('active_workout_timer_end');
     } catch {}
@@ -1093,6 +1093,8 @@ export const ActiveWorkout: React.FC = () => {
       } else if (event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
         if (event.data.action === 'skip_rest') {
           stopTimerSilently();
+        } else if (event.data.action === 'finish_workout') {
+          handleEncerrarTreinoRef.current();
         }
       }
     };
@@ -1108,6 +1110,8 @@ export const ActiveWorkout: React.FC = () => {
         } else if (event.data?.type === 'WORKOUT_NOTIFICATION_ACTION') {
           if (event.data.action === 'skip_rest') {
             stopTimerSilently();
+          } else if (event.data.action === 'finish_workout') {
+            handleEncerrarTreinoRef.current();
           }
         }
       };
@@ -1218,6 +1222,7 @@ export const ActiveWorkout: React.FC = () => {
       executeEndWorkout();
     }
   };
+  handleEncerrarTreinoRef.current = handleEncerrarTreino;
 
   const executeEndWorkout = async () => {
     if (!user || !treino) return;
@@ -1267,134 +1272,6 @@ export const ActiveWorkout: React.FC = () => {
     };
   }, []);
 
-  // Processar ações disparadas diretamente pelos botões do Smartwatch / Barra de Notificações
-  const handleNotificationAction = (action: string) => {
-    const now = Date.now();
-    // Debounce para evitar cliques duplicados acidentais em menos de 700ms
-    if (now - lastActionTimestampRef.current < 700) {
-      return;
-    }
-    lastActionTimestampRef.current = now;
-
-    if (action.startsWith('complete_set')) {
-      const curTreino = treinoRef.current;
-      if (!curTreino) return;
-
-      const curExecData = execucaoDataRef.current;
-      const curSlotIdx = activeSlotIndexRef.current ?? 0;
-
-      let targetSlotIdx = curSlotIdx;
-      let targetSerieIdx = -1;
-
-      // Se a notificação enviou o índice específico da série (ex: complete_set_0_1)
-      const parts = action.split('_');
-      if (parts.length >= 4) {
-        const parsedSlot = parseInt(parts[2], 10);
-        const parsedSerie = parseInt(parts[3], 10);
-        if (!isNaN(parsedSlot) && !isNaN(parsedSerie)) {
-          targetSlotIdx = parsedSlot;
-          targetSerieIdx = parsedSerie;
-        }
-      }
-
-      // Se não veio índice específico ou se o índice especificado já estiver concluído
-      let slot = curTreino.listaExercicios[targetSlotIdx];
-      if (slot) {
-        const slotIds = typeof slot === 'string' ? [slot] : slot.ids;
-        const firstId = slotIds[0];
-        const seriesList = curExecData[`${targetSlotIdx}-${firstId}`]?.series || [];
-
-        // Se targetSerieIdx é inválido ou já está concluído, encontra a primeira série incompleta
-        if (targetSerieIdx === -1 || (seriesList[targetSerieIdx] && seriesList[targetSerieIdx].concluida)) {
-          // Checar se o slot todo já foi concluído
-          const isSlotDone = slotIds.every(id => curExecData[`${targetSlotIdx}-${id}`]?.concluido);
-          if (isSlotDone) {
-            const nextIdx = curTreino.listaExercicios.findIndex((sl, idx) => {
-              const ids = typeof sl === 'string' ? [sl] : sl.ids;
-              return !ids.every(id => curExecData[`${idx}-${id}`]?.concluido);
-            });
-            if (nextIdx !== -1) {
-              targetSlotIdx = nextIdx;
-              slot = curTreino.listaExercicios[targetSlotIdx];
-            }
-          }
-
-          if (slot) {
-            const ids = typeof slot === 'string' ? [slot] : slot.ids;
-            const fId = ids[0];
-            const sList = curExecData[`${targetSlotIdx}-${fId}`]?.series || [];
-            targetSerieIdx = sList.findIndex(s => !s.concluida);
-          }
-        }
-      }
-
-      if (targetSerieIdx !== -1) {
-        completeSerieSlot(targetSlotIdx, targetSerieIdx);
-      }
-    } else if (action === 'skip_rest') {
-      stopTimer();
-      syncWorkoutNotification();
-    } else if (action === 'repeat_rest' || action === 'add_rest_time' || action === 'add_30s') {
-      const curSlot = activeSlotIndexRef.current ?? 0;
-      const { duration: dur } = getSlotTimerInfo(curSlot);
-      if (targetEndTimeRef.current && timerActiveRef.current) {
-        targetEndTimeRef.current += dur * 1000;
-        checkTimerTick();
-      } else {
-        startTimer(dur, curSlot);
-      }
-    } else if (action === 'finish_workout') {
-      handleEncerrarTreino();
-    }
-  };
-
-  // Listener para mensagens vindas do Service Worker ao clicar em botões no Smartwatch ou barra
-  useEffect(() => {
-    if (!("serviceWorker" in navigator)) return;
-
-    const onMessage = (event: MessageEvent) => {
-      if (!event.data) return;
-      if (event.data.type === 'WORKOUT_STATE_UPDATED') {
-        const session = event.data.session;
-        if (session && session.execucaoData && session.treinoId === id) {
-          execucaoDataRef.current = session.execucaoData;
-          setExecucaoData(session.execucaoData);
-          if (session.activeSlotIndex !== undefined) {
-            activeSlotIndexRef.current = session.activeSlotIndex;
-            setActiveSlotIndex(session.activeSlotIndex);
-          }
-          if (session.activeTimer && session.activeTimer.targetEndTime) {
-            const remaining = Math.ceil((session.activeTimer.targetEndTime - Date.now()) / 1000);
-            if (remaining > 0) {
-              targetEndTimeRef.current = session.activeTimer.targetEndTime;
-              setTimeLeft(remaining);
-              setTimerActive(true);
-            }
-          }
-        }
-      } else if (event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
-        handleNotificationAction(event.data.action);
-      } else if (event.data.type === 'WORKOUT_TIMER_DONE') {
-        setTimeLeft(0);
-        setTimerActive(false);
-        targetEndTimeRef.current = null;
-        try {
-          sessionStorage.removeItem('active_workout_timer_end');
-        } catch {}
-        if (timerRef.current) {
-          clearInterval(timerRef.current);
-          timerRef.current = null;
-        }
-        notifyTimerComplete();
-      }
-    };
-
-    navigator.serviceWorker.addEventListener('message', onMessage);
-    return () => {
-      navigator.serviceWorker.removeEventListener('message', onMessage);
-    };
-  }, [id, treino, allExs]);
-
   // Sincronizar o exercício atual e série ativa com o Smartwatch / Notificação enquanto não estiver descansando
   useEffect(() => {
     if (!timerActive && isInitialized) {
@@ -1413,17 +1290,14 @@ export const ActiveWorkout: React.FC = () => {
   return (
     <div className="pb-24 animate-in fade-in duration-300">
       {/* Timer */}
-      {timeLeft !== null && (
+      {timeLeft !== null && timeLeft > 0 && (
         <div className="fixed top-6 left-0 right-0 z-[60] flex justify-center p-2 pointer-events-none">
-          <div className={`pointer-events-auto shadow-2xl rounded-3xl px-6 sm:px-8 py-3.5 sm:py-4 flex items-center space-x-4 sm:space-x-6 border border-white/10 backdrop-blur-md transition-all ${timeLeft === 0 ? 'bg-red-600 animate-pulse ring-4 ring-red-500/30' : 'bg-brand-600 shadow-brand-900/50'}`}>
+          <div className="pointer-events-auto shadow-2xl rounded-3xl px-6 sm:px-8 py-3.5 sm:py-4 flex items-center space-x-4 sm:space-x-6 border border-white/10 backdrop-blur-md transition-all bg-brand-600 shadow-brand-900/50">
             <Timer size={26} className="text-white shrink-0" />
             <div className="flex flex-col">
               <span className="text-white font-mono text-2xl sm:text-3xl font-black tracking-wider leading-none">
                 {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
               </span>
-              {timeLeft === 0 && (
-                <span className="text-[10px] text-white/90 font-bold uppercase tracking-widest mt-1">Tempo esgotado!</span>
-              )}
             </div>
             <button 
               onClick={stopTimer} 

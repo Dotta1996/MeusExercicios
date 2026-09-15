@@ -1,4 +1,4 @@
-const CACHE_NAME = 'meusex-v1.5.3';
+const CACHE_NAME = 'meusex-v2.3.0';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
@@ -114,6 +114,9 @@ const renderTimerNotification = async (remainingSecs) => {
       tag: 'workout-interactive-tracker',
       renotify: false,
       silent: true,
+      data: {
+        type: 'skip_rest'
+      },
       actions: [
         { action: 'skip_rest', title: '⏩ Pular Descanso' }
       ]
@@ -159,6 +162,11 @@ const handleTimerZero = async () => {
       renotify: true,
       requireInteraction: true,
       vibrate: [400, 200, 400, 200, 800],
+      data: {
+        type: 'complete_set',
+        slotIdx: targetSlotIdx,
+        serieIdx: targetSerieIdx
+      },
       actions: [
         { action: `complete_set_${targetSlotIdx}_${targetSerieIdx}`, title: `✅ Concluir Série ${currentSerieNum}` }
       ]
@@ -473,113 +481,85 @@ self.addEventListener('fetch', (event) => {
 
 // --- CLIQUES EM NOTIFICAÇÕES (SMARTWATCH / LOCK SCREEN / BARRA) ---
 self.addEventListener('notificationclick', (event) => {
-  const action = event.action;
+  let action = event.action;
+  const notifData = event.notification.data || {};
 
   // Fechar a notificação para que a nova tome o lugar
   event.notification.close();
 
-  if (action) {
-    // 1. Pular Descanso
-    if (action === 'skip_rest') {
-      event.waitUntil((async () => {
-        const session = await getStoredSession();
-        const data = activeTimerData || session?.activeTimer;
-        clearActiveTimer();
-        if (session) {
-          session.activeTimer = null;
-          await saveStoredSession(session);
-          notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
-        }
-
-        if (data) {
-          const sSlot = (data.targetSlotIdx !== undefined && !isNaN(data.targetSlotIdx))
-            ? data.targetSlotIdx
-            : ((data.slotIndex !== undefined && !isNaN(data.slotIndex)) ? data.slotIndex : 0);
-          const sSerie = (data.targetSerieIdx !== undefined && !isNaN(data.targetSerieIdx))
-            ? data.targetSerieIdx
-            : ((data.serieIndex !== undefined && !isNaN(data.serieIndex)) ? data.serieIndex : 0);
-
-          const durLabel = data.timerDuration ? `${data.timerDuration}s` : 'Tempo';
-          await self.registration.showNotification(`🔔 Hora da Série ${data.currentSerieNum}/${data.totalSeries}!`, {
-            body: `${data.exName}: ${data.currentReps} reps com ${data.currentPeso}kg • Toque para concluir`,
-            icon: '/icon-192.png',
-            badge: '/icon-192.png',
-            tag: 'workout-interactive-tracker',
-            renotify: true,
-            requireInteraction: true,
-            vibrate: [350, 150, 350, 150, 500],
-            actions: [
-              { action: `complete_set_${sSlot}_${sSerie}`, title: `✅ Concluir Série ${data.currentSerieNum}` }
-            ]
-          });
-        }
-        notifyClients({ type: 'WORKOUT_NOTIFICATION_ACTION', action: 'skip_rest', timestamp: Date.now() });
-      })());
-      return;
-    }
-
-    // 2. Repetir ou adicionar descanso com o tempo exato do exercício
-    if (action === 'repeat_rest' || action === 'add_rest_time' || action === 'add_30s') {
-      event.waitUntil((async () => {
-        const session = await getStoredSession();
-        const data = activeTimerData || session?.activeTimer;
-        const dur = (data && data.timerDuration) ? data.timerDuration : 60;
-
-        if (activeTimerTarget) {
-          // Timer já ativo: adiciona o tempo do exercício
-          activeTimerTarget += dur * 1000;
-          if (activeTimerData) activeTimerData.targetEndTime = activeTimerTarget;
-          if (session && session.activeTimer) {
-            session.activeTimer.targetEndTime = activeTimerTarget;
-            await saveStoredSession(session);
-          }
-          const remainingSecs = Math.max(0, Math.ceil((activeTimerTarget - Date.now()) / 1000));
-          renderTimerNotification(remainingSecs);
-        } else if (data) {
-          // Timer estava zerado: inicia novo descanso com o tempo do exercício
-          const targetEnd = Date.now() + dur * 1000;
-          const newTimerInfo = {
-            ...data,
-            targetEndTime: targetEnd,
-            duration: dur,
-            timerDuration: dur
-          };
-          if (session) {
-            session.activeTimer = newTimerInfo;
-            await saveStoredSession(session);
-          }
-          startSWTimer(newTimerInfo);
-        }
-        notifyClients({ type: 'WORKOUT_NOTIFICATION_ACTION', action: 'repeat_rest', duration: dur, timestamp: Date.now() });
-      })());
-      return;
-    }
-
-    // 3. Concluir Série (complete_set_slot_serie)
-    if (action.startsWith('complete_set')) {
-      const parts = action.split('_');
-      const slotIdx = parseInt(parts[2], 10);
-      const serieIdx = parseInt(parts[3], 10);
-
-      event.waitUntil(handleCompleteSetInSW(slotIdx, serieIdx));
-      return;
-    }
-
-    // 4. Finalizar Treino
-    if (action === 'finish_workout') {
-      event.waitUntil(
-        clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-          for (const client of clientList) {
-            if ('focus' in client) return client.focus();
-          }
-          if (clients.openWindow) return clients.openWindow('/');
-        })
-      );
-      return;
-    }
+  // Se clicou no corpo da notificação de "Hora da Série", conclui a série!
+  if (!action && notifData.type === 'complete_set') {
+    action = `complete_set_${notifData.slotIdx}_${notifData.serieIdx}`;
   }
 
-  // Se clicou no corpo da notificação: foca ou abre a aba do treino
+  // 1. Pular Descanso (via botão ou toque no corpo durante descanso)
+  if (action === 'skip_rest' || (!action && notifData.type === 'skip_rest')) {
+    event.waitUntil((async () => {
+      const session = await getStoredSession();
+      const data = activeTimerData || session?.activeTimer;
+      clearActiveTimer();
+      if (session) {
+        session.activeTimer = null;
+        await saveStoredSession(session);
+        notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
+      }
+
+      if (data) {
+        const sSlot = (data.targetSlotIdx !== undefined && !isNaN(data.targetSlotIdx))
+          ? data.targetSlotIdx
+          : ((data.slotIndex !== undefined && !isNaN(data.slotIndex)) ? data.slotIndex : 0);
+        const sSerie = (data.targetSerieIdx !== undefined && !isNaN(data.targetSerieIdx))
+          ? data.targetSerieIdx
+          : ((data.serieIndex !== undefined && !isNaN(data.serieIndex)) ? data.serieIndex : 0);
+
+        await self.registration.showNotification(`🔔 Hora da Série ${data.currentSerieNum}/${data.totalSeries}!`, {
+          body: `${data.exName}: ${data.currentReps} reps com ${data.currentPeso}kg • Toque para concluir`,
+          icon: '/icon-192.png',
+          badge: '/icon-192.png',
+          tag: 'workout-interactive-tracker',
+          renotify: true,
+          requireInteraction: true,
+          vibrate: [350, 150, 350, 150, 500],
+          data: {
+            type: 'complete_set',
+            slotIdx: sSlot,
+            serieIdx: sSerie
+          },
+          actions: [
+            { action: `complete_set_${sSlot}_${sSerie}`, title: `✅ Concluir Série ${data.currentSerieNum}` }
+          ]
+        });
+      }
+      notifyClients({ type: 'WORKOUT_NOTIFICATION_ACTION', action: 'skip_rest', timestamp: Date.now() });
+    })());
+    return;
+  }
+
+  // 2. Concluir Série (complete_set_slot_serie)
+  if (action && action.startsWith('complete_set')) {
+    const parts = action.split('_');
+    const slotIdx = parseInt(parts[2], 10);
+    const serieIdx = parseInt(parts[3], 10);
+
+    event.waitUntil(handleCompleteSetInSW(slotIdx, serieIdx));
+    return;
+  }
+
+  // 3. Finalizar Treino
+  if (action === 'finish_workout') {
+    notifyClients({ type: 'WORKOUT_NOTIFICATION_ACTION', action: 'finish_workout', timestamp: Date.now() });
+    event.waitUntil(
+      clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+        for (const client of clientList) {
+          if ('focus' in client) return client.focus();
+        }
+        if (clients.openWindow) return clients.openWindow('/');
+      })
+    );
+    return;
+  }
+
+  // Se clicou no corpo de outra notificação genérica: foca ou abre a aba do treino
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
@@ -593,6 +573,12 @@ self.addEventListener('notificationclick', (event) => {
 // --- MENSAGENS RECEBIDAS DA ABA DO APP ---
 self.addEventListener('message', (event) => {
   if (!event.data) return;
+
+  // 0. Pular espera e assumir controle imediatamente
+  if (event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+    return;
+  }
 
   // 1. Sincronizar o estado completo da sessão ativa
   if (event.data.type === 'SYNC_WORKOUT_STATE') {
