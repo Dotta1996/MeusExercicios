@@ -46,6 +46,9 @@ self.addEventListener('fetch', (event) => {
 self.addEventListener('notificationclick', (event) => {
   const action = event.action;
 
+  // Fechar a notificação clicada imediatamente para não travar na barra ou no relógio
+  event.notification.close();
+
   // Se o usuário clicou em um botão de ação direto do relógio ou barra (ex: 'complete_set', 'skip_rest', 'add_30s')
   if (action) {
     event.waitUntil(

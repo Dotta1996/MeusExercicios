@@ -327,7 +327,7 @@ export const ActiveWorkout: React.FC = () => {
           renotify: true,
           vibrate: [350, 150, 350, 150, 500],
           actions: [
-            { action: 'complete_set', title: `✅ Concluir Série ${currentSerieNum}` },
+            { action: `complete_set_${targetSlotIdx}_${uncompletedIdx !== -1 ? uncompletedIdx : 0}`, title: `✅ Concluir Série ${currentSerieNum}` },
             { action: 'add_30s', title: '⏱️ +30s' }
           ]
         } as ExtendedNotificationOptions);
@@ -342,8 +342,7 @@ export const ActiveWorkout: React.FC = () => {
         tag: "workout-interactive-tracker",
         renotify: false,
         actions: [
-          { action: 'complete_set', title: `✅ Concluir Série ${currentSerieNum}` },
-          { action: 'next_slot', title: '⏭️ Próx. Ex.' }
+          { action: `complete_set_${targetSlotIdx}_${uncompletedIdx !== -1 ? uncompletedIdx : 0}`, title: `✅ Concluir Série ${currentSerieNum}` }
         ]
       } as ExtendedNotificationOptions);
 
@@ -658,17 +657,33 @@ export const ActiveWorkout: React.FC = () => {
   };
 
   const toggleSerieSlot = (slotIndex: number, sIndex: number) => {
-    if (!treino) return;
-    const slot = treino.listaExercicios[slotIndex];
+    const curTreino = treinoRef.current;
+    if (!curTreino) return;
+    const slot = curTreino.listaExercicios[slotIndex];
+    if (!slot) return;
     const ids = typeof slot === 'string' ? [slot] : slot.ids;
+    const curAllExs = allExsRef.current;
     
+    const firstKey = `${slotIndex}-${ids[0]}`;
+    const currentData = execucaoDataRef.current;
+    if (!currentData[firstKey] || !currentData[firstKey].series[sIndex]) return;
+
+    const newState = !currentData[firstKey].series[sIndex].concluida;
+
+    // Verificar se devemos disparar cronômetro
+    let shouldStartTimer = false;
+    let timerDuration = 60;
+    if (newState) {
+      const timerExId = ids.find(id => curAllExs[id]?.timerAtivo !== false);
+      if (timerExId) {
+        shouldStartTimer = true;
+        const dur = curAllExs[timerExId]?.timerPadrao;
+        timerDuration = typeof dur === 'number' && dur > 0 ? dur : 60;
+      }
+    }
+
     setExecucaoData(prev => {
       const next = { ...prev };
-      const firstKey = `${slotIndex}-${ids[0]}`;
-      if (!next[firstKey] || !next[firstKey].series[sIndex]) return prev;
-
-      const newState = !next[firstKey].series[sIndex].concluida;
-      
       ids.forEach(exId => {
         const key = `${slotIndex}-${exId}`;
         if (next[key]) {
@@ -681,29 +696,26 @@ export const ActiveWorkout: React.FC = () => {
       });
 
       if (newState) {
-        const timerEx = ids.find(id => allExs[id]?.timerAtivo);
-        if (timerEx) startTimer(allExs[timerEx].timerPadrao);
-
         const allSeriesDone = ids.every(id => next[`${slotIndex}-${id}`]?.series.every(s => s.concluida));
 
         if (allSeriesDone) {
-           ids.forEach(id => { 
-             const key = `${slotIndex}-${id}`;
-             next[key] = { ...next[key], concluido: true };
-           });
-           setTimeout(() => {
-             setActiveSlotIndex(prev => {
-               if (prev === slotIndex && treino.listaExercicios[slotIndex + 1]) {
-                 return slotIndex + 1;
-               }
-               return prev;
-             });
-           }, 400);
+          ids.forEach(id => { 
+            const key = `${slotIndex}-${id}`;
+            next[key] = { ...next[key], concluido: true };
+          });
+          setTimeout(() => {
+            setActiveSlotIndex(prev => {
+              if (prev === slotIndex && curTreino.listaExercicios[slotIndex + 1]) {
+                return slotIndex + 1;
+              }
+              return prev;
+            });
+          }, 400);
         } else {
-           ids.forEach(id => { 
-             const key = `${slotIndex}-${id}`;
-             next[key] = { ...next[key], concluido: false };
-           });
+          ids.forEach(id => { 
+            const key = `${slotIndex}-${id}`;
+            next[key] = { ...next[key], concluido: false };
+          });
         }
       } else {
         ids.forEach(id => { 
@@ -712,8 +724,14 @@ export const ActiveWorkout: React.FC = () => {
         });
       }
       
+      execucaoDataRef.current = next;
       return next;
     });
+
+    // Iniciar o cronômetro do descanso FORA do callback do setExecucaoData
+    if (newState && shouldStartTimer) {
+      startTimer(timerDuration);
+    }
   };
 
   const addSerieToSlot = (slotIndex: number) => {
@@ -832,39 +850,55 @@ export const ActiveWorkout: React.FC = () => {
 
   // Processar ações disparadas diretamente pelos botões do Smartwatch / Barra de Notificações
   const handleNotificationAction = (action: string) => {
-    if (action === 'complete_set') {
-      const curSlotIdx = activeSlotIndexRef.current ?? 0;
+    if (action.startsWith('complete_set')) {
       const curTreino = treinoRef.current;
       if (!curTreino) return;
 
-      let targetSlotIdx = curSlotIdx;
-      let targetSlot = curTreino.listaExercicios[targetSlotIdx];
       const curExecData = execucaoDataRef.current;
+      const curSlotIdx = activeSlotIndexRef.current ?? 0;
 
-      // Se o slot atual estiver concluído, buscar o primeiro incompleto
-      if (targetSlot) {
-        const slotIds = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
-        const isDone = slotIds.every(id => curExecData[`${targetSlotIdx}-${id}`]?.concluido);
-        if (isDone) {
-          const nextIdx = curTreino.listaExercicios.findIndex((sl, idx) => {
-            const ids = typeof sl === 'string' ? [sl] : sl.ids;
-            return !ids.every(id => curExecData[`${idx}-${id}`]?.concluido);
-          });
-          if (nextIdx !== -1) {
-            targetSlotIdx = nextIdx;
-            targetSlot = curTreino.listaExercicios[targetSlotIdx];
-          }
+      let targetSlotIdx = curSlotIdx;
+      let targetSerieIdx = -1;
+
+      // Se a notificação enviou o índice específico da série (ex: complete_set_0_1)
+      const parts = action.split('_');
+      if (parts.length >= 4) {
+        const parsedSlot = parseInt(parts[2], 10);
+        const parsedSerie = parseInt(parts[3], 10);
+        if (!isNaN(parsedSlot) && !isNaN(parsedSerie)) {
+          targetSlotIdx = parsedSlot;
+          targetSerieIdx = parsedSerie;
         }
       }
 
-      if (targetSlot) {
-        const ids = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
-        const firstId = ids[0];
-        const seriesList = curExecData[`${targetSlotIdx}-${firstId}`]?.series || [];
-        const uncompletedIdx = seriesList.findIndex(s => !s.concluida);
-        if (uncompletedIdx !== -1) {
-          toggleSerieSlot(targetSlotIdx, uncompletedIdx);
+      // Se não veio índice específico ou precisa confirmar slot incompleto
+      if (targetSerieIdx === -1) {
+        let slot = curTreino.listaExercicios[targetSlotIdx];
+        if (slot) {
+          const slotIds = typeof slot === 'string' ? [slot] : slot.ids;
+          const isDone = slotIds.every(id => curExecData[`${targetSlotIdx}-${id}`]?.concluido);
+          if (isDone) {
+            const nextIdx = curTreino.listaExercicios.findIndex((sl, idx) => {
+              const ids = typeof sl === 'string' ? [sl] : sl.ids;
+              return !ids.every(id => curExecData[`${idx}-${id}`]?.concluido);
+            });
+            if (nextIdx !== -1) {
+              targetSlotIdx = nextIdx;
+              slot = curTreino.listaExercicios[targetSlotIdx];
+            }
+          }
         }
+
+        if (slot) {
+          const ids = typeof slot === 'string' ? [slot] : slot.ids;
+          const firstId = ids[0];
+          const seriesList = curExecData[`${targetSlotIdx}-${firstId}`]?.series || [];
+          targetSerieIdx = seriesList.findIndex(s => !s.concluida);
+        }
+      }
+
+      if (targetSerieIdx !== -1) {
+        toggleSerieSlot(targetSlotIdx, targetSerieIdx);
       }
     } else if (action === 'skip_rest') {
       stopTimer();
@@ -875,11 +909,6 @@ export const ActiveWorkout: React.FC = () => {
       } else {
         startTimer(30);
       }
-    } else if (action === 'next_slot') {
-      setActiveSlotIndex(prev => {
-        const len = treinoRef.current?.listaExercicios.length || 0;
-        return (prev !== null && prev < len - 1) ? prev + 1 : prev;
-      });
     } else if (action === 'finish_workout') {
       handleEncerrarTreino();
     }
