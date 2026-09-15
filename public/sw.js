@@ -42,8 +42,29 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Abertura/foco no app ao clicar na notificação da barra do celular
+// Interação com a notificação (botões de ação no Smartwatch/Barra de notificações ou clique no corpo)
 self.addEventListener('notificationclick', (event) => {
+  const action = event.action;
+
+  // Se o usuário clicou em um botão de ação direto do relógio ou barra (ex: 'complete_set', 'skip_rest', 'add_30s')
+  if (action) {
+    event.waitUntil(
+      clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+        if (clientList && clientList.length > 0) {
+          clientList.forEach((client) => {
+            client.postMessage({
+              type: 'WORKOUT_NOTIFICATION_ACTION',
+              action: action,
+              timestamp: Date.now()
+            });
+          });
+        }
+      })
+    );
+    return;
+  }
+
+  // Se clicou no corpo da notificação, fecha e traz o aplicativo para o primeiro plano
   event.notification.close();
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
@@ -59,15 +80,17 @@ self.addEventListener('notificationclick', (event) => {
   );
 });
 
-// Suporte a mensagens do app para exibir notificação direta ou agendada
+// Suporte a mensagens enviadas pelo app
 self.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'SHOW_TIMER_NOTIFICATION') {
+  if (!event.data) return;
+
+  if (event.data.type === 'SHOW_TIMER_NOTIFICATION') {
     const title = event.data.title || '⏱️ Descanso Concluído!';
     const options = {
       body: event.data.body || 'Hora da próxima série! Mantenha o foco.',
       icon: '/icon-192.png',
       badge: '/icon-192.png',
-      vibrate: [300, 150, 300, 150, 450],
+      vibrate: [350, 150, 350, 150, 500],
       tag: 'workout-timer',
       renotify: true,
       requireInteraction: true,
@@ -75,5 +98,12 @@ self.addEventListener('message', (event) => {
       data: event.data.data || { url: '/' }
     };
     self.registration.showNotification(title, options);
+  }
+
+  if (event.data.type === 'CLOSE_WORKOUT_NOTIFICATIONS') {
+    const tag = event.data.tag || 'workout-interactive-tracker';
+    self.registration.getNotifications({ tag }).then((notifications) => {
+      notifications.forEach((n) => n.close());
+    });
   }
 });

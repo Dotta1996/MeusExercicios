@@ -4,7 +4,13 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../AuthContext';
 import { getTreinos, getExercicios, addExecucao, updateUserProfile, getLastExercicioData, saveSessaoAtiva, getSessaoAtiva, deleteSessaoAtiva, updateExercicio } from '../../services/dbService';
 import { Treino, Exercicio, ExercicioExecutado, SerieExecutada, TreinoSlot, SessaoAtiva } from '../../types';
-import { Check, Square, Timer, Plus, Minus, X, ChevronDown, ChevronUp, Weight, Layers, Settings2, Save, AlertTriangle, FileText, Edit2, Bell, BellRing, BellOff } from 'lucide-react';
+import { Check, Square, Timer, Plus, Minus, X, ChevronDown, ChevronUp, Weight, Layers, Settings2, Save, AlertTriangle, FileText, Edit2, Bell, BellRing, BellOff, Watch, Sparkles, HelpCircle } from 'lucide-react';
+
+type ExtendedNotificationOptions = NotificationOptions & {
+  actions?: { action: string; title: string; icon?: string }[];
+  vibrate?: number[];
+  renotify?: boolean;
+};
 
 export const ActiveWorkout: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -25,6 +31,27 @@ export const ActiveWorkout: React.FC = () => {
   const targetEndTimeRef = useRef<number | null>(null);
   const silentKeepAliveRef = useRef<{ ctx: AudioContext; osc: OscillatorNode; gain: GainNode } | null>(null);
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | 'unsupported'>('default');
+
+  // Modo Notificação Interativa para Smartwatch / Barra de Notificações
+  const [watchModeEnabled, setWatchModeEnabled] = useState<boolean>(true);
+  const [showWatchHelp, setShowWatchHelp] = useState<boolean>(false);
+
+  // Referências sincronizadas para o listener do Service Worker
+  const execucaoDataRef = useRef(execucaoData);
+  const activeSlotIndexRef = useRef(activeSlotIndex);
+  const treinoRef = useRef(treino);
+  const timeLeftRef = useRef(timeLeft);
+  const timerActiveRef = useRef(timerActive);
+  const watchModeEnabledRef = useRef(watchModeEnabled);
+  const allExsRef = useRef(allExs);
+
+  useEffect(() => { execucaoDataRef.current = execucaoData; }, [execucaoData]);
+  useEffect(() => { activeSlotIndexRef.current = activeSlotIndex; }, [activeSlotIndex]);
+  useEffect(() => { treinoRef.current = treino; }, [treino]);
+  useEffect(() => { timeLeftRef.current = timeLeft; }, [timeLeft]);
+  useEffect(() => { timerActiveRef.current = timerActive; }, [timerActive]);
+  useEffect(() => { watchModeEnabledRef.current = watchModeEnabled; }, [watchModeEnabled]);
+  useEffect(() => { allExsRef.current = allExs; }, [allExs]);
 
   // Estados para o Modal de Ajuste
   const [editingSlotIndex, setEditingSlotIndex] = useState<number | null>(null);
@@ -190,21 +217,148 @@ export const ActiveWorkout: React.FC = () => {
     };
   }, []);
 
+  const clearWorkoutNotification = async () => {
+    try {
+      if ("serviceWorker" in navigator) {
+        const reg = await navigator.serviceWorker.ready;
+        if (reg) {
+          const notifs = await reg.getNotifications({ tag: 'workout-interactive-tracker' });
+          notifs.forEach(n => n.close());
+        }
+      }
+    } catch (e) {
+      console.warn("Erro ao limpar notificação interativa:", e);
+    }
+  };
+
+  const syncWorkoutNotification = async (overrideTimeLeft?: number | null) => {
+    if (!("Notification" in window) || Notification.permission !== "granted" || !watchModeEnabledRef.current) return;
+    if (!treinoRef.current) return;
+
+    try {
+      if (!("serviceWorker" in navigator)) return;
+      const reg = await navigator.serviceWorker.ready;
+      if (!reg || !("showNotification" in reg)) return;
+
+      const currentExecData = execucaoDataRef.current;
+      const currentSlotIdx = activeSlotIndexRef.current ?? 0;
+      const currentTreino = treinoRef.current;
+      const activeTimer = timerActiveRef.current;
+      const currentTime = overrideTimeLeft !== undefined ? overrideTimeLeft : timeLeftRef.current;
+      const currentAllExs = allExsRef.current;
+
+      // Localizar o slot atual ou primeiro incompleto
+      let targetSlotIdx = currentSlotIdx;
+      let targetSlot = currentTreino.listaExercicios[targetSlotIdx];
+
+      if (targetSlot) {
+        const slotIds = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
+        const isSlotDone = slotIds.every(id => currentExecData[`${targetSlotIdx}-${id}`]?.concluido);
+        if (isSlotDone) {
+          const nextIncomplete = currentTreino.listaExercicios.findIndex((sl, idx) => {
+            const ids = typeof sl === 'string' ? [sl] : sl.ids;
+            return !ids.every(id => currentExecData[`${idx}-${id}`]?.concluido);
+          });
+          if (nextIncomplete !== -1) {
+            targetSlotIdx = nextIncomplete;
+            targetSlot = currentTreino.listaExercicios[targetSlotIdx];
+          }
+        }
+      }
+
+      // Se todas as séries de todos os slots foram concluídas
+      const allSlotsFinished = currentTreino.listaExercicios.every((sl, idx) => {
+        const ids = typeof sl === 'string' ? [sl] : sl.ids;
+        return ids.every(id => currentExecData[`${idx}-${id}`]?.concluido);
+      });
+
+      if (allSlotsFinished) {
+        await reg.showNotification("🎉 Treino Concluído!", {
+          body: "Todas as séries foram finalizadas. Toque para encerrar e salvar!",
+          icon: "/icon-192.png",
+          badge: "/icon-192.png",
+          tag: "workout-interactive-tracker",
+          renotify: false,
+          actions: [
+            { action: 'finish_workout', title: '🏁 Finalizar Treino' }
+          ]
+        } as ExtendedNotificationOptions);
+        return;
+      }
+
+      if (!targetSlot) return;
+
+      const ids = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
+      const firstExId = ids[0];
+      const exName = ids.map(id => currentAllExs[id]?.nome || 'Exercício').join(' / ');
+      const seriesList = currentExecData[`${targetSlotIdx}-${firstExId}`]?.series || [];
+      const uncompletedIdx = seriesList.findIndex(s => !s.concluida);
+
+      const currentSerieNum = uncompletedIdx !== -1 ? uncompletedIdx + 1 : seriesList.length;
+      const totalSeries = seriesList.length;
+      const currentReps = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].reps : 10;
+      const currentPeso = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].peso : 0;
+
+      // Caso 1: Descanso Ativo (Contagem regressiva no relógio / barra)
+      if (activeTimer && currentTime !== null && currentTime > 0) {
+        const mins = Math.floor(currentTime / 60);
+        const secs = (currentTime % 60).toString().padStart(2, '0');
+        await reg.showNotification(`⏱️ Descanso: ${mins}:${secs}`, {
+          body: `Próx: Série ${currentSerieNum}/${totalSeries} de ${exName} (${currentPeso}kg • ${currentReps} reps)`,
+          icon: "/icon-192.png",
+          badge: "/icon-192.png",
+          tag: "workout-interactive-tracker",
+          renotify: false,
+          actions: [
+            { action: 'skip_rest', title: '⏩ Pular' },
+            { action: 'add_30s', title: '➕ +30s' }
+          ]
+        } as ExtendedNotificationOptions);
+        return;
+      }
+
+      // Caso 2: Descanso Zerado (Aviso de hora da série)
+      if (currentTime === 0) {
+        await reg.showNotification(`🔔 Hora da Série ${currentSerieNum}/${totalSeries}!`, {
+          body: `${exName}: ${currentReps} reps com ${currentPeso}kg`,
+          icon: "/icon-192.png",
+          badge: "/icon-192.png",
+          tag: "workout-interactive-tracker",
+          renotify: true,
+          vibrate: [350, 150, 350, 150, 500],
+          actions: [
+            { action: 'complete_set', title: `✅ Concluir Série ${currentSerieNum}` },
+            { action: 'add_30s', title: '⏱️ +30s' }
+          ]
+        } as ExtendedNotificationOptions);
+        return;
+      }
+
+      // Caso 3: Executando Série (Aguardando conclusão pelo relógio ou app)
+      await reg.showNotification(`🏋️ ${exName} (${currentSerieNum}/${totalSeries})`, {
+        body: `${currentReps} reps • ${currentPeso}kg | Toque abaixo no relógio ao concluir`,
+        icon: "/icon-192.png",
+        badge: "/icon-192.png",
+        tag: "workout-interactive-tracker",
+        renotify: false,
+        actions: [
+          { action: 'complete_set', title: `✅ Concluir Série ${currentSerieNum}` },
+          { action: 'next_slot', title: '⏭️ Próx. Ex.' }
+        ]
+      } as ExtendedNotificationOptions);
+
+    } catch (e) {
+      console.warn("Erro ao emitir notificação interativa:", e);
+    }
+  };
+
   const requestNotifPermission = async () => {
     if (!("Notification" in window)) return;
     try {
       const res = await Notification.requestPermission();
       setNotifPermission(res);
-      if (res === 'granted' && "serviceWorker" in navigator) {
-        const reg = await navigator.serviceWorker.ready;
-        if (reg && "showNotification" in reg) {
-          reg.showNotification("🔔 Notificações Ativadas!", {
-            body: "Você receberá alertas com vibração ao final de cada descanso.",
-            icon: "/icon-192.png",
-            badge: "/icon-192.png",
-            tag: "notif-test"
-          });
-        }
+      if (res === 'granted') {
+        syncWorkoutNotification();
       }
     } catch (e) {
       console.warn("Erro ao solicitar permissão de notificação:", e);
@@ -287,40 +441,8 @@ export const ActiveWorkout: React.FC = () => {
       } catch {}
     }
 
-    // 2. Disparo na barra de notificações do celular (via Service Worker para Android/PWA)
-    if ("Notification" in window && Notification.permission === "granted") {
-      const notifTitle = "⏱️ Descanso Concluído!";
-      const notifOptions: NotificationOptions & { vibrate?: number[]; renotify?: boolean } = {
-        body: `Hora da próxima série de ${treino?.nome || 'treino'}! Mantenha o foco.`,
-        icon: "/icon-192.png",
-        badge: "/icon-192.png",
-        vibrate: [350, 150, 350, 150, 500],
-        tag: "workout-timer",
-        renotify: true,
-        requireInteraction: true,
-        silent: false,
-        data: { url: window.location.href }
-      };
-
-      try {
-        if ("serviceWorker" in navigator) {
-          const reg = await navigator.serviceWorker.ready;
-          if (reg && "showNotification" in reg) {
-            await reg.showNotification(notifTitle, notifOptions);
-            return;
-          }
-        }
-      } catch (err) {
-        console.warn("ServiceWorker showNotification falhou, tentando Notification:", err);
-      }
-
-      // Fallback
-      try {
-        new Notification(notifTitle, notifOptions);
-      } catch (e) {
-        console.warn("Fallback Notification falhou:", e);
-      }
-    }
+    // 2. Disparo na barra de notificações e relógio com botões interativos
+    syncWorkoutNotification(0);
   };
 
   const checkTimerTick = () => {
@@ -343,6 +465,10 @@ export const ActiveWorkout: React.FC = () => {
       notifyTimerComplete();
     } else {
       setTimeLeft(remainingSecs);
+      // Sincronização periódica com a barra / smartwatch a cada 10 segundos ou aos 5s
+      if (remainingSecs % 10 === 0 || remainingSecs === 5) {
+        syncWorkoutNotification(remainingSecs);
+      }
     }
   };
 
@@ -430,7 +556,10 @@ export const ActiveWorkout: React.FC = () => {
     // Pedir permissão de notificação se disponível e ainda não configurada
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission()
-        .then(res => setNotifPermission(res))
+        .then(res => {
+          setNotifPermission(res);
+          if (res === 'granted') syncWorkoutNotification(seconds);
+        })
         .catch(() => {});
     }
 
@@ -443,6 +572,7 @@ export const ActiveWorkout: React.FC = () => {
     } catch {}
     setTimeLeft(seconds);
     setTimerActive(true);
+    syncWorkoutNotification(seconds);
   };
   
   const stopTimer = () => {
@@ -457,6 +587,7 @@ export const ActiveWorkout: React.FC = () => {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
+    syncWorkoutNotification(null);
   };
 
   const toggleExpandSlot = (index: number) => {
@@ -682,6 +813,7 @@ export const ActiveWorkout: React.FC = () => {
         console.warn("Falha ao salvar marcação de encerramento:", e);
       }
 
+      await clearWorkoutNotification();
       await refreshProfile();
       navigate('/', { replace: true });
     } catch (error) { 
@@ -690,6 +822,91 @@ export const ActiveWorkout: React.FC = () => {
       alert("Erro ao salvar."); 
     }
   };
+
+  // Limpeza de notificações interativas ao sair da tela
+  useEffect(() => {
+    return () => {
+      clearWorkoutNotification();
+    };
+  }, []);
+
+  // Processar ações disparadas diretamente pelos botões do Smartwatch / Barra de Notificações
+  const handleNotificationAction = (action: string) => {
+    if (action === 'complete_set') {
+      const curSlotIdx = activeSlotIndexRef.current ?? 0;
+      const curTreino = treinoRef.current;
+      if (!curTreino) return;
+
+      let targetSlotIdx = curSlotIdx;
+      let targetSlot = curTreino.listaExercicios[targetSlotIdx];
+      const curExecData = execucaoDataRef.current;
+
+      // Se o slot atual estiver concluído, buscar o primeiro incompleto
+      if (targetSlot) {
+        const slotIds = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
+        const isDone = slotIds.every(id => curExecData[`${targetSlotIdx}-${id}`]?.concluido);
+        if (isDone) {
+          const nextIdx = curTreino.listaExercicios.findIndex((sl, idx) => {
+            const ids = typeof sl === 'string' ? [sl] : sl.ids;
+            return !ids.every(id => curExecData[`${idx}-${id}`]?.concluido);
+          });
+          if (nextIdx !== -1) {
+            targetSlotIdx = nextIdx;
+            targetSlot = curTreino.listaExercicios[targetSlotIdx];
+          }
+        }
+      }
+
+      if (targetSlot) {
+        const ids = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
+        const firstId = ids[0];
+        const seriesList = curExecData[`${targetSlotIdx}-${firstId}`]?.series || [];
+        const uncompletedIdx = seriesList.findIndex(s => !s.concluida);
+        if (uncompletedIdx !== -1) {
+          toggleSerieSlot(targetSlotIdx, uncompletedIdx);
+        }
+      }
+    } else if (action === 'skip_rest') {
+      stopTimer();
+    } else if (action === 'add_30s') {
+      if (targetEndTimeRef.current) {
+        targetEndTimeRef.current += 30000;
+        checkTimerTick();
+      } else {
+        startTimer(30);
+      }
+    } else if (action === 'next_slot') {
+      setActiveSlotIndex(prev => {
+        const len = treinoRef.current?.listaExercicios.length || 0;
+        return (prev !== null && prev < len - 1) ? prev + 1 : prev;
+      });
+    } else if (action === 'finish_workout') {
+      handleEncerrarTreino();
+    }
+  };
+
+  // Listener para mensagens vindas do Service Worker ao clicar em botões no Smartwatch ou barra
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
+        handleNotificationAction(event.data.action);
+      }
+    };
+
+    navigator.serviceWorker.addEventListener('message', onMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', onMessage);
+    };
+  }, [treino, allExs]);
+
+  // Sincronizar o exercício atual e série ativa com o Smartwatch / Notificação enquanto não estiver descansando
+  useEffect(() => {
+    if (!timerActive && isInitialized) {
+      syncWorkoutNotification();
+    }
+  }, [execucaoData, activeSlotIndex, watchModeEnabled, isInitialized]);
 
   if (!treino || Object.keys(execucaoData).length === 0) return <div className="p-12 text-center text-zinc-500">Iniciando...</div>;
 
@@ -735,18 +952,28 @@ export const ActiveWorkout: React.FC = () => {
                 </span>
 
                 {notifPermission === 'granted' ? (
-                  <span className="flex items-center space-x-1 text-[10px] font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2 py-0.5 rounded-full">
-                    <Bell size={11} />
-                    <span>Alertas na barra ativos</span>
-                  </span>
+                  <button 
+                    type="button"
+                    onClick={() => setShowWatchHelp(true)}
+                    className={`flex items-center space-x-1.5 text-[10px] font-bold px-2.5 py-0.5 rounded-full border transition-all ${
+                      watchModeEnabled 
+                        ? 'bg-emerald-950/60 border-emerald-700/60 text-emerald-300 shadow-sm shadow-emerald-900/30 hover:bg-emerald-900/40' 
+                        : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700'
+                    }`}
+                    title="Controle interativo pelo relógio e barra de notificações"
+                  >
+                    <Watch size={11} className={watchModeEnabled ? 'text-emerald-400 animate-pulse' : 'text-zinc-400'} />
+                    <span>{watchModeEnabled ? 'Relógio & Notificações Ativos' : 'Modo Relógio Pausado'}</span>
+                  </button>
                 ) : notifPermission !== 'unsupported' ? (
                   <button 
+                    type="button"
                     onClick={requestNotifPermission}
-                    className="flex items-center space-x-1 text-[10px] font-bold text-amber-300 bg-amber-950/40 border border-amber-800/50 hover:bg-amber-900/50 px-2 py-0.5 rounded-full transition-all"
-                    title="Ativar notificações na barra do celular"
+                    className="flex items-center space-x-1.5 text-[10px] font-bold text-amber-300 bg-amber-950/50 border border-amber-700/60 hover:bg-amber-900/50 px-2.5 py-0.5 rounded-full transition-all active:scale-95"
+                    title="Conectar relógio e notificações interativas"
                   >
-                    <BellOff size={11} />
-                    <span>Ativar alertas na barra</span>
+                    <Watch size={11} />
+                    <span>Conectar Relógio & Notificações</span>
                   </button>
                 ) : null}
               </div>
@@ -756,24 +983,29 @@ export const ActiveWorkout: React.FC = () => {
       </div>
 
       {notifPermission === 'default' && (
-        <div className="bg-gradient-to-r from-brand-950/80 to-zinc-900 border border-brand-800/60 rounded-2xl p-3.5 mb-6 flex items-center justify-between shadow-lg">
-          <div className="flex items-center space-x-3 mr-3 min-w-0">
-            <div className="w-9 h-9 rounded-xl bg-brand-900/50 flex items-center justify-center text-brand-400 shrink-0">
-              <BellRing size={18} />
+        <div className="bg-gradient-to-r from-brand-950/90 via-zinc-900 to-zinc-900 border border-brand-700/60 rounded-3xl p-4 mb-6 shadow-xl relative overflow-hidden">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start space-x-3 mr-2 min-w-0">
+              <div className="w-10 h-10 rounded-2xl bg-brand-900/70 border border-brand-700/50 flex items-center justify-center text-brand-400 shrink-0 mt-0.5 shadow-md shadow-brand-950">
+                <Watch size={20} />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <p className="text-xs font-black text-white uppercase tracking-wider">Controle no Smartwatch & Barra</p>
+                  <span className="bg-brand-500/20 text-brand-300 border border-brand-500/30 text-[9px] px-1.5 py-0.2 rounded-md font-bold uppercase">Interativo</span>
+                </div>
+                <p className="text-[11px] text-zinc-300 mt-1 leading-snug">
+                  Conclua séries e veja o cronômetro diretamente do seu <strong>Wear OS, Apple Watch, Galaxy Watch</strong> ou na barra de notificações sem precisar desbloquear o celular!
+                </p>
+              </div>
             </div>
-            <div className="min-w-0">
-              <p className="text-xs font-bold text-white">Alertas na barra de notificações</p>
-              <p className="text-[11px] text-zinc-400 leading-tight">
-                Receba vibração e aviso na barra do celular quando o descanso terminar, mesmo fora do app.
-              </p>
-            </div>
+            <button
+              onClick={requestNotifPermission}
+              className="bg-brand-600 hover:bg-brand-500 text-white font-black text-xs px-4 py-2.5 rounded-xl shrink-0 transition-all active:scale-95 shadow-lg shadow-brand-900/50 flex items-center space-x-1"
+            >
+              <span>Conectar</span>
+            </button>
           </div>
-          <button
-            onClick={requestNotifPermission}
-            className="bg-brand-600 hover:bg-brand-500 text-white font-black text-xs px-3.5 py-2.5 rounded-xl shrink-0 transition-all active:scale-95 shadow-md shadow-brand-900/40"
-          >
-            Ativar
-          </button>
         </div>
       )}
 
@@ -1114,6 +1346,118 @@ export const ActiveWorkout: React.FC = () => {
                 className="flex-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-black py-3.5 rounded-2xl text-xs shadow-lg shadow-amber-900/30 transition-colors"
               >
                 {savingObs ? 'Salvando...' : 'Salvar Observação'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE CONFIGURAÇÃO E AJUDA DO SMARTWATCH / NOTIFICAÇÕES */}
+      {showWatchHelp && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="bg-zinc-900 w-full max-w-md rounded-[36px] border border-zinc-800 p-6 shadow-2xl animate-in zoom-in-95 duration-300 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-start mb-4">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-2xl bg-emerald-950/60 border border-emerald-700/50 flex items-center justify-center text-emerald-400">
+                  <Watch size={22} />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-white">Controle no Smartwatch</h3>
+                  <p className="text-[11px] text-zinc-400">Treine sem tirar o celular do bolso</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowWatchHelp(false)}
+                className="p-1.5 text-zinc-400 hover:text-white rounded-xl bg-zinc-800 transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Toggle de Ativação */}
+            <div className="bg-black/60 border border-zinc-800/80 rounded-2xl p-4 mb-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs font-bold text-white">Espelhamento no Relógio</p>
+                <p className="text-[11px] text-zinc-400">Mantém notificações com botões no relógio</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const nextVal = !watchModeEnabled;
+                  setWatchModeEnabled(nextVal);
+                  if (nextVal) {
+                    syncWorkoutNotification();
+                  } else {
+                    clearWorkoutNotification();
+                  }
+                }}
+                className={`w-12 h-6 rounded-full transition-colors relative flex items-center px-0.5 ${
+                  watchModeEnabled ? 'bg-emerald-500' : 'bg-zinc-700'
+                }`}
+              >
+                <div 
+                  className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                    watchModeEnabled ? 'translate-x-6' : 'translate-x-0'
+                  }`} 
+                />
+              </button>
+            </div>
+
+            {/* Guia de uso */}
+            <div className="space-y-3 mb-6">
+              <div className="bg-zinc-800/40 border border-zinc-800 rounded-2xl p-3 flex items-start space-x-3">
+                <span className="text-base">🏋️</span>
+                <div className="text-xs">
+                  <p className="font-bold text-zinc-200">Durante a Execução da Série</p>
+                  <p className="text-zinc-400 text-[11px] mt-0.5">
+                    O relógio mostra o nome do exercício, série, repetições e carga. Quando acabar, basta tocar em <strong>"✅ Concluir Série"</strong> no pulso!
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-zinc-800/40 border border-zinc-800 rounded-2xl p-3 flex items-start space-x-3">
+                <span className="text-base">⏱️</span>
+                <div className="text-xs">
+                  <p className="font-bold text-zinc-200">Durante o Descanso</p>
+                  <p className="text-zinc-400 text-[11px] mt-0.5">
+                    O cronômetro é exibido no seu relógio com botões para <strong>"⏩ Pular"</strong> ou <strong>"➕ +30s"</strong>.
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-zinc-800/40 border border-zinc-800 rounded-2xl p-3 flex items-start space-x-3">
+                <span className="text-base">🔔</span>
+                <div className="text-xs">
+                  <p className="font-bold text-zinc-200">Vibração e Alerta no Pulso</p>
+                  <p className="text-zinc-400 text-[11px] mt-0.5">
+                    Ao zerar o tempo, seu relógio vibra em padrão rítmico forte e avisa que é hora da próxima série.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Botões de Ação */}
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => {
+                  syncWorkoutNotification();
+                  if ("vibrate" in navigator) {
+                    try { navigator.vibrate([200, 100, 200]); } catch {}
+                  }
+                }}
+                className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-emerald-400 font-bold text-xs rounded-2xl border border-zinc-700 flex items-center justify-center space-x-2 transition-all active:scale-95"
+              >
+                <Sparkles size={14} />
+                <span>Testar Notificação no Relógio Agora</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowWatchHelp(false)}
+                className="w-full py-3.5 bg-brand-600 hover:bg-brand-500 text-white font-black text-xs rounded-2xl transition-all active:scale-95"
+              >
+                Entendi, Voltar ao Treino
               </button>
             </div>
           </div>
