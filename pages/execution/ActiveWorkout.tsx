@@ -30,8 +30,6 @@ export const ActiveWorkout: React.FC = () => {
   const [timerActive, setTimerActive] = useState(false);
   const timerRef = useRef<number | null>(null);
   const targetEndTimeRef = useRef<number | null>(null);
-  const silentKeepAliveRef = useRef<{ ctx: AudioContext; osc: OscillatorNode; gain: GainNode } | null>(null);
-  const audioKeepAliveElRef = useRef<HTMLAudioElement | null>(null);
   const lastActionTimestampRef = useRef<number>(0);
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | 'unsupported'>('default');
 
@@ -260,10 +258,21 @@ export const ActiveWorkout: React.FC = () => {
     } else {
       setNotifPermission(Notification.permission);
     }
-    return () => {
-      stopKeepAlive();
-    };
   }, []);
+
+  // Aciona o app nativo de Timer/Relógio do Android para contar o descanso.
+  // O alarme é gerenciado pelo AlarmManager do sistema, então toca na hora certa
+  // mesmo com a tela apagada — não depende do nosso Service Worker ficar vivo.
+  const openNativeTimer = (seconds: number, label: string) => {
+    try {
+      const msg = encodeURIComponent((label || 'Descanso').substring(0, 100));
+      const fallback = encodeURIComponent(window.location.href);
+      const intentUrl = `intent:#Intent;action=android.intent.action.SET_TIMER;i.android.intent.extra.alarm.LENGTH=${Math.max(1, Math.round(seconds))};S.android.intent.extra.alarm.MESSAGE=${msg};B.android.intent.extra.alarm.SKIP_UI=true;S.browser_fallback_url=${fallback};end`;
+      window.location.href = intentUrl;
+    } catch (e) {
+      console.warn("Não foi possível abrir o timer nativo do Android:", e);
+    }
+  };
 
   // Manter a tela ativa durante o treino (Screen Wake Lock API)
   useEffect(() => {
@@ -371,7 +380,7 @@ export const ActiveWorkout: React.FC = () => {
     }
   };
 
-  const syncWorkoutNotification = async (overrideTimeLeft?: number | null, overrideExecData?: Record<string, ExercicioExecutado>) => {
+  const syncWorkoutNotification = async (overrideExecData?: Record<string, ExercicioExecutado>) => {
     if (!("Notification" in window) || Notification.permission !== "granted" || !watchModeEnabledRef.current) return;
     if (!treinoRef.current) return;
 
@@ -383,8 +392,6 @@ export const ActiveWorkout: React.FC = () => {
       const currentExecData = overrideExecData || execucaoDataRef.current;
       const currentSlotIdx = activeSlotIndexRef.current ?? 0;
       const currentTreino = treinoRef.current;
-      const activeTimer = timerActiveRef.current;
-      const currentTime = overrideTimeLeft !== undefined ? overrideTimeLeft : timeLeftRef.current;
       const currentAllExs = allExsRef.current;
 
       // Localizar o slot atual ou primeiro incompleto
@@ -439,28 +446,9 @@ export const ActiveWorkout: React.FC = () => {
       const currentReps = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].reps : 10;
       const currentPeso = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].peso : 0;
 
-      // Caso 1: Descanso Ativo (Contagem regressiva no relógio / barra)
-      if (activeTimer && currentTime !== null && currentTime > 0) {
-        const mins = Math.floor(currentTime / 60);
-        const secs = (currentTime % 60).toString().padStart(2, '0');
-        await reg.showNotification(`⏱️ Descanso: ${mins}:${secs} • ${exName}`, {
-          body: `Próx: Série ${currentSerieNum}/${totalSeries} (${currentPeso}kg • ${currentReps} reps)`,
-          icon: "/icon-192.png",
-          badge: "/icon-192.png",
-          tag: "workout-interactive-tracker",
-          renotify: false,
-          silent: true,
-          data: {
-            type: 'skip_rest'
-          },
-          actions: [
-            { action: 'skip_rest', title: '⏩ Pular Descanso' }
-          ]
-        } as ExtendedNotificationOptions);
-        return;
-      }
-
-      // Caso 2: Executando Série ou descanso concluído (Aguardando conclusão pelo relógio ou app)
+      // Notificação acionável com o próximo passo (série atual/seguinte).
+      // O descanso em si é contado pelo app nativo de Timer do Android, então
+      // esta notificação não precisa ficar se atualizando a cada segundo.
       const targetSerie = uncompletedIdx !== -1 ? uncompletedIdx : 0;
       await reg.showNotification(`🔔 Série ${currentSerieNum}/${totalSeries} • ${exName}`, {
         body: `${currentReps} reps • ${currentPeso}kg | Toque abaixo ao concluir`,
@@ -496,59 +484,6 @@ export const ActiveWorkout: React.FC = () => {
     }
   };
 
-  // Áudio silencioso em segundo plano para impedir que navegadores móveis (Android/iOS) congelem o cronômetro ao alternar de app
-  const startKeepAlive = () => {
-    try {
-      if (!audioKeepAliveElRef.current) {
-        const audio = new Audio();
-        // Áudio WAV silencioso de 1 segundo em base64
-        audio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-        audio.loop = true;
-        audio.volume = 0.001;
-        audioKeepAliveElRef.current = audio;
-      }
-      audioKeepAliveElRef.current.play().catch(() => {});
-    } catch {}
-
-    try {
-      if (silentKeepAliveRef.current) return;
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      if (ctx.state === 'suspended') {
-        ctx.resume();
-      }
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      // Volume inaudível apenas para manter o processo ativo no sistema operacional
-      osc.frequency.setValueAtTime(440, ctx.currentTime);
-      gain.gain.setValueAtTime(0.00001, ctx.currentTime);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      silentKeepAliveRef.current = { ctx, osc, gain };
-    } catch (e) {
-      console.warn("Keep-alive audio não iniciado:", e);
-    }
-  };
-
-  const stopKeepAlive = () => {
-    try {
-      if (audioKeepAliveElRef.current) {
-        audioKeepAliveElRef.current.pause();
-      }
-    } catch {}
-    try {
-      if (silentKeepAliveRef.current) {
-        silentKeepAliveRef.current.osc.stop();
-        silentKeepAliveRef.current.osc.disconnect();
-        silentKeepAliveRef.current.gain.disconnect();
-        silentKeepAliveRef.current.ctx.close();
-        silentKeepAliveRef.current = null;
-      }
-    } catch {}
-  };
-
   const playSoundAlert = () => {
     try {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -578,19 +513,15 @@ export const ActiveWorkout: React.FC = () => {
     }
   };
 
-  const notifyTimerComplete = async () => {
-    stopKeepAlive();
+  // Bônus apenas para quando o app está em primeiro plano — o alarme confiável
+  // de fim de descanso já é responsabilidade do app nativo de Timer do Android.
+  const notifyTimerComplete = () => {
     playSoundAlert();
-
-    // 1. Vibração direta do dispositivo móvel
     if ("vibrate" in navigator) {
       try {
         navigator.vibrate([400, 200, 400, 200, 800]);
       } catch {}
     }
-
-    // 2. Disparo na barra de notificações e relógio com botões interativos
-    syncWorkoutNotification(null);
   };
 
   const checkTimerTick = () => {
@@ -615,10 +546,6 @@ export const ActiveWorkout: React.FC = () => {
       notifyTimerComplete();
     } else {
       setTimeLeft(remainingSecs);
-      // Sincronização periódica com a barra / smartwatch a cada 10 segundos ou aos 5s
-      if (remainingSecs % 10 === 0 || remainingSecs === 5) {
-        syncWorkoutNotification(remainingSecs);
-      }
     }
   };
 
@@ -720,12 +647,10 @@ export const ActiveWorkout: React.FC = () => {
       Notification.requestPermission()
         .then(res => {
           setNotifPermission(res);
-          if (res === 'granted') syncWorkoutNotification(seconds, explicitExecData);
+          if (res === 'granted') syncWorkoutNotification(explicitExecData);
         })
         .catch(() => {});
     }
-
-    startKeepAlive();
 
     const targetEnd = Date.now() + seconds * 1000;
     targetEndTimeRef.current = targetEnd;
@@ -735,11 +660,12 @@ export const ActiveWorkout: React.FC = () => {
     setTimeLeft(seconds);
     setTimerActive(true);
 
-    // Enviar dados para o Service Worker gerenciar o contador na notificação em segundo plano
+    // Resolver o nome do exercício para exibir no timer nativo do Android
     const currentExecData = explicitExecData || execucaoDataRef.current;
     const currentSlotIdx = targetSlotIndex !== undefined ? targetSlotIndex : (activeSlotIndexRef.current ?? 0);
     const currentTreino = treinoRef.current;
     const currentAllExs = allExsRef.current;
+    let exName = 'Descanso';
 
     if (currentTreino) {
       let resolvedSlotIdx = currentSlotIdx;
@@ -762,61 +688,18 @@ export const ActiveWorkout: React.FC = () => {
 
       if (targetSlot) {
         const ids = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
-        const firstExId = ids[0];
-        const exName = ids.map(id => currentAllExs[id]?.nome || 'Exercício').join(' / ');
-        const seriesList = currentExecData[`${resolvedSlotIdx}-${firstExId}`]?.series || [];
-        const uncompletedIdx = seriesList.findIndex(s => !s.concluida);
-        const nextSerieNum = uncompletedIdx !== -1 ? uncompletedIdx + 1 : seriesList.length;
-        const totalSeries = seriesList.length;
-        const nextReps = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].reps : 10;
-        const nextPeso = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].peso : 0;
-        const targetSerieIdx = uncompletedIdx !== -1 ? uncompletedIdx : 0;
-
-        if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
-          navigator.serviceWorker.controller.postMessage({
-            type: 'START_TIMER_COUNTDOWN',
-            targetEndTime: targetEnd,
-            duration: seconds,
-            timerDuration: seconds,
-            exName: exName,
-            currentSerieNum: nextSerieNum,
-            totalSeries: totalSeries,
-            currentPeso: nextPeso,
-            currentReps: nextReps,
-            targetSlotIdx: resolvedSlotIdx,
-            targetSerieIdx: targetSerieIdx
-          });
-        }
+        exName = ids.map(id => currentAllExs[id]?.nome || 'Exercício').join(' / ');
       }
     }
 
-    syncWorkoutNotification(seconds, explicitExecData);
+    // Aciona o alarme confiável no app nativo de Timer do Android...
+    openNativeTimer(seconds, exName);
+    // ...e mostra imediatamente a notificação acionável com o próximo passo
+    // (não depende de nenhuma contagem em segundo plano para aparecer).
+    syncWorkoutNotification(explicitExecData);
   };
   
   const stopTimer = () => {
-    stopKeepAlive();
-    timerActiveRef.current = false;
-    timeLeftRef.current = null;
-    targetEndTimeRef.current = null;
-    setTimerActive(false);
-    setTimeLeft(null);
-    try {
-      sessionStorage.removeItem('active_workout_timer_end');
-    } catch {}
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-    if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.controller.postMessage({
-        type: 'STOP_TIMER_COUNTDOWN'
-      });
-    }
-    syncWorkoutNotification(null);
-  };
-
-  const stopTimerSilently = () => {
-    stopKeepAlive();
     timerActiveRef.current = false;
     timeLeftRef.current = null;
     targetEndTimeRef.current = null;
@@ -1088,12 +971,10 @@ export const ActiveWorkout: React.FC = () => {
       if (!event.data) return;
       if (event.data.type === 'WORKOUT_STATE_UPDATED' && event.data.session) {
         handleRemoteSessionUpdate(event.data.session);
-      } else if (event.data.type === 'WORKOUT_TIMER_DONE') {
-        stopTimerSilently();
+      } else if (event.data.type === 'OPEN_NATIVE_TIMER') {
+        openNativeTimer(event.data.seconds, event.data.label);
       } else if (event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
-        if (event.data.action === 'skip_rest') {
-          stopTimerSilently();
-        } else if (event.data.action === 'finish_workout') {
+        if (event.data.action === 'finish_workout') {
           handleEncerrarTreinoRef.current();
         }
       }
@@ -1105,12 +986,10 @@ export const ActiveWorkout: React.FC = () => {
       bc.onmessage = (event) => {
         if (event.data?.type === 'WORKOUT_STATE_UPDATED' && event.data.session) {
           handleRemoteSessionUpdate(event.data.session);
-        } else if (event.data?.type === 'WORKOUT_TIMER_DONE') {
-          stopTimerSilently();
+        } else if (event.data?.type === 'OPEN_NATIVE_TIMER') {
+          openNativeTimer(event.data.seconds, event.data.label);
         } else if (event.data?.type === 'WORKOUT_NOTIFICATION_ACTION') {
-          if (event.data.action === 'skip_rest') {
-            stopTimerSilently();
-          } else if (event.data.action === 'finish_workout') {
+          if (event.data.action === 'finish_workout') {
             handleEncerrarTreinoRef.current();
           }
         }
@@ -1799,7 +1678,7 @@ export const ActiveWorkout: React.FC = () => {
                 <div className="text-xs">
                   <p className="font-bold text-zinc-200">Durante o Descanso</p>
                   <p className="text-zinc-400 text-[11px] mt-0.5">
-                    O cronômetro é exibido no seu relógio com botões para <strong>"⏩ Pular"</strong> ou <strong>"➕ +30s"</strong>.
+                    O app aciona o <strong>Timer do Android</strong> para contar o descanso — ele toca na hora certa mesmo com a tela apagada. Quer terminar antes? É só tocar em <strong>"✅ Concluir Série"</strong>.
                   </p>
                 </div>
               </div>
@@ -1807,9 +1686,9 @@ export const ActiveWorkout: React.FC = () => {
               <div className="bg-zinc-800/40 border border-zinc-800 rounded-2xl p-3 flex items-start space-x-3">
                 <span className="text-base">🔔</span>
                 <div className="text-xs">
-                  <p className="font-bold text-zinc-200">Vibração e Alerta no Pulso</p>
+                  <p className="font-bold text-zinc-200">Alerta de Fim de Descanso</p>
                   <p className="text-zinc-400 text-[11px] mt-0.5">
-                    Ao zerar o tempo, seu relógio vibra em padrão rítmico forte e avisa que é hora da próxima série.
+                    O alarme do Timer nativo toca/vibra quando o descanso acaba, e a notificação da próxima série já está esperando no seu relógio desde o início do descanso.
                   </p>
                 </div>
               </div>

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'meusex-v2.3.0';
+const CACHE_NAME = 'meusex-v2.4.0';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
@@ -65,20 +65,6 @@ function clearStoredSession() {
   }).catch(() => false);
 }
 
-// --- ESTADO DO CRONÔMETRO NO SERVICE WORKER ---
-let activeTimerTarget = null;
-let activeTimerData = null;
-let timerIntervalId = null;
-
-const clearActiveTimer = () => {
-  if (timerIntervalId) {
-    clearInterval(timerIntervalId);
-    timerIntervalId = null;
-  }
-  activeTimerTarget = null;
-  activeTimerData = null;
-};
-
 const notifyClients = (payload) => {
   clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
     if (clientList && clientList.length > 0) {
@@ -99,127 +85,34 @@ const notifyClients = (payload) => {
   } catch (e) {}
 };
 
-// Renderizar notificação de descanso durante a contagem regressiva
-const renderTimerNotification = async (remainingSecs) => {
-  if (!activeTimerData) return;
-  const { exName, currentSerieNum, totalSeries, currentPeso, currentReps } = activeTimerData;
-  const mins = Math.floor(remainingSecs / 60);
-  const secs = (remainingSecs % 60).toString().padStart(2, '0');
-
-  try {
-    await self.registration.showNotification(`⏱️ Descanso: ${mins}:${secs} • ${exName}`, {
-      body: `Próx: Série ${currentSerieNum}/${totalSeries} (${currentPeso}kg • ${currentReps} reps)`,
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
-      tag: 'workout-interactive-tracker',
-      renotify: false,
-      silent: true,
-      data: {
-        type: 'skip_rest'
-      },
-      actions: [
-        { action: 'skip_rest', title: '⏩ Pular Descanso' }
-      ]
-    });
-  } catch (err) {
-    console.warn('Erro ao atualizar notificação de descanso:', err);
-  }
+// Aciona o app nativo de Timer/Relógio do Android para contar o descanso.
+// O AlarmManager do sistema garante que o alarme toca na hora certa mesmo
+// com a tela apagada — diferente de um setInterval dentro do Service Worker,
+// que o navegador pode suspender a qualquer momento em segundo plano.
+const buildTimerIntentUrl = (seconds, label) => {
+  const msg = encodeURIComponent((label || 'Descanso').substring(0, 100));
+  return `intent:#Intent;action=android.intent.action.SET_TIMER;i.android.intent.extra.alarm.LENGTH=${Math.max(1, Math.round(seconds))};S.android.intent.extra.alarm.MESSAGE=${msg};B.android.intent.extra.alarm.SKIP_UI=true;end`;
 };
 
-// Disparo ao zerar o tempo: notificação chamando para a série com vibração
-const handleTimerZero = async () => {
-  const data = activeTimerData ? { ...activeTimerData } : null;
-  clearActiveTimer();
-
-  // Limpa o timer na sessão salva no IndexedDB e notifica os clientes
+const triggerNativeTimer = async (seconds, label) => {
   try {
-    const session = await getStoredSession();
-    if (session) {
-      session.activeTimer = null;
-      await saveStoredSession(session);
-      notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
+    const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (clientList && clientList.length > 0) {
+      clientList.forEach(client => {
+        try {
+          client.postMessage({ type: 'OPEN_NATIVE_TIMER', seconds, label });
+        } catch (e) {}
+      });
+      return;
     }
-  } catch (e) {}
-
-  if (!data) return;
-
-  const targetSlotIdx = (data.targetSlotIdx !== undefined && !isNaN(data.targetSlotIdx))
-    ? data.targetSlotIdx
-    : ((data.slotIndex !== undefined && !isNaN(data.slotIndex)) ? data.slotIndex : 0);
-
-  const targetSerieIdx = (data.targetSerieIdx !== undefined && !isNaN(data.targetSerieIdx))
-    ? data.targetSerieIdx
-    : ((data.serieIndex !== undefined && !isNaN(data.serieIndex)) ? data.serieIndex : 0);
-
-  const { exName, currentSerieNum, totalSeries, currentPeso, currentReps } = data;
-
-  try {
-    await self.registration.showNotification(`🔔 Hora da Série ${currentSerieNum}/${totalSeries}!`, {
-      body: `${exName}: ${currentReps} reps com ${currentPeso}kg • Toque para concluir`,
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
-      tag: 'workout-interactive-tracker',
-      renotify: true,
-      requireInteraction: true,
-      vibrate: [400, 200, 400, 200, 800],
-      data: {
-        type: 'complete_set',
-        slotIdx: targetSlotIdx,
-        serieIdx: targetSerieIdx
-      },
-      actions: [
-        { action: `complete_set_${targetSlotIdx}_${targetSerieIdx}`, title: `✅ Concluir Série ${currentSerieNum}` }
-      ]
-    });
-  } catch (err) {
-    console.warn('Erro ao disparar notificação de término do descanso:', err);
+    // Sem nenhuma aba aberta (ação disparada só pelo relógio): melhor esforço
+    // para abrir o timer nativo diretamente a partir do Service Worker.
+    if (clients.openWindow) {
+      await clients.openWindow(buildTimerIntentUrl(seconds, label));
+    }
+  } catch (e) {
+    console.warn('Erro ao acionar o timer nativo:', e);
   }
-
-  notifyClients({
-    type: 'WORKOUT_TIMER_DONE',
-    timestamp: Date.now()
-  });
-};
-
-// Loop do cronômetro: checa a cada segundo, mas só atualiza notificação a cada 5s
-// para evitar que o Android ou relógios Wear OS congelem ou descartem notificações
-const tickSWTimer = async () => {
-  if (!activeTimerTarget || !activeTimerData) {
-    clearActiveTimer();
-    return;
-  }
-  const now = Date.now();
-  const remainingMs = activeTimerTarget - now;
-  const remainingSecs = Math.max(0, Math.ceil(remainingMs / 1000));
-
-  if (remainingSecs <= 0) {
-    await handleTimerZero();
-    return;
-  }
-
-  const lastRender = activeTimerData.lastRenderTime || 0;
-  // Atualiza no início, a cada 5 segundos, e a cada segundo nos últimos 5 segundos
-  const shouldRender = (now - lastRender >= 5000) || (remainingSecs <= 5);
-
-  if (shouldRender) {
-    activeTimerData.lastRenderTime = now;
-    await renderTimerNotification(remainingSecs);
-  }
-};
-
-const startSWTimer = (timerInfo) => {
-  clearActiveTimer();
-  activeTimerTarget = timerInfo.targetEndTime;
-  activeTimerData = {
-    ...timerInfo,
-    lastRenderTime: 0
-  };
-
-  const remainingMs = activeTimerTarget - Date.now();
-  const remainingSecs = Math.max(0, Math.ceil(remainingMs / 1000));
-  renderTimerNotification(remainingSecs);
-
-  timerIntervalId = setInterval(tickSWTimer, 1000);
 };
 
 // --- PROCESSAR CONCLUSÃO DE SÉRIE DIRETO NO SERVICE WORKER (EM SEGUNDO PLANO) ---
@@ -360,7 +253,6 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
 
   if (nextSlotIdx === -1) {
     // Treino 100% finalizado
-    clearActiveTimer();
     session.activeTimer = null;
     await saveStoredSession(session);
     notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
@@ -380,45 +272,40 @@ async function handleCompleteSetInSW(slotIdx, serieIdx) {
     return;
   }
 
-  // Se o exercício tem timer ativo, inicia o cronômetro com o tempo exato configurado pelo usuário
+  // Se o exercício tem timer ativo, guarda o alvo (para o widget da aba se recuperar
+  // ao voltar) e aciona o alarme confiável no app nativo de Timer do Android.
   if (timerEnabled) {
     const targetEnd = Date.now() + timerDuration * 1000;
-    const activeTimer = {
+    session.activeTimer = {
       targetEndTime: targetEnd,
       duration: timerDuration,
       timerDuration: timerDuration,
       slotIndex: nextSlotIdx,
       targetSlotIdx: nextSlotIdx,
       serieIndex: nextSerieIdx,
-      targetSerieIdx: nextSerieIdx,
-      exName: nextExName,
-      currentSerieNum: nextSerieIdx + 1,
-      totalSeries: totalSeries,
-      currentPeso: nextPeso,
-      currentReps: nextReps
+      targetSerieIdx: nextSerieIdx
     };
-    session.activeTimer = activeTimer;
-    await saveStoredSession(session);
-    notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
-
-    startSWTimer(activeTimer);
   } else {
-    // Sem timer: exibe imediatamente a notificação da próxima série
-    clearActiveTimer();
     session.activeTimer = null;
-    await saveStoredSession(session);
-    notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
+  }
+  await saveStoredSession(session);
+  notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
 
-    await self.registration.showNotification(`🏋️ ${nextExName} (${nextSerieIdx + 1}/${totalSeries})`, {
-      body: `${nextReps} reps • ${nextPeso}kg | Toque abaixo ao concluir`,
-      icon: "/icon-192.png",
-      badge: "/icon-192.png",
-      tag: "workout-interactive-tracker",
-      renotify: true,
-      actions: [
-        { action: `complete_set_${nextSlotIdx}_${nextSerieIdx}`, title: `✅ Concluir Série ${nextSerieIdx + 1}` }
-      ]
-    });
+  // Mostra imediatamente a notificação acionável com a próxima série — não
+  // depende de nenhuma contagem em segundo plano para aparecer.
+  await self.registration.showNotification(`🔔 Série ${nextSerieIdx + 1}/${totalSeries} • ${nextExName}`, {
+    body: `${nextReps} reps • ${nextPeso}kg | Toque abaixo ao concluir`,
+    icon: "/icon-192.png",
+    badge: "/icon-192.png",
+    tag: "workout-interactive-tracker",
+    renotify: true,
+    actions: [
+      { action: `complete_set_${nextSlotIdx}_${nextSerieIdx}`, title: `✅ Concluir Série ${nextSerieIdx + 1}` }
+    ]
+  });
+
+  if (timerEnabled) {
+    await triggerNativeTimer(timerDuration, nextExName);
   }
 }
 
@@ -492,50 +379,7 @@ self.addEventListener('notificationclick', (event) => {
     action = `complete_set_${notifData.slotIdx}_${notifData.serieIdx}`;
   }
 
-  // 1. Pular Descanso (via botão ou toque no corpo durante descanso)
-  if (action === 'skip_rest' || (!action && notifData.type === 'skip_rest')) {
-    event.waitUntil((async () => {
-      const session = await getStoredSession();
-      const data = activeTimerData || session?.activeTimer;
-      clearActiveTimer();
-      if (session) {
-        session.activeTimer = null;
-        await saveStoredSession(session);
-        notifyClients({ type: 'WORKOUT_STATE_UPDATED', session });
-      }
-
-      if (data) {
-        const sSlot = (data.targetSlotIdx !== undefined && !isNaN(data.targetSlotIdx))
-          ? data.targetSlotIdx
-          : ((data.slotIndex !== undefined && !isNaN(data.slotIndex)) ? data.slotIndex : 0);
-        const sSerie = (data.targetSerieIdx !== undefined && !isNaN(data.targetSerieIdx))
-          ? data.targetSerieIdx
-          : ((data.serieIndex !== undefined && !isNaN(data.serieIndex)) ? data.serieIndex : 0);
-
-        await self.registration.showNotification(`🔔 Hora da Série ${data.currentSerieNum}/${data.totalSeries}!`, {
-          body: `${data.exName}: ${data.currentReps} reps com ${data.currentPeso}kg • Toque para concluir`,
-          icon: '/icon-192.png',
-          badge: '/icon-192.png',
-          tag: 'workout-interactive-tracker',
-          renotify: true,
-          requireInteraction: true,
-          vibrate: [350, 150, 350, 150, 500],
-          data: {
-            type: 'complete_set',
-            slotIdx: sSlot,
-            serieIdx: sSerie
-          },
-          actions: [
-            { action: `complete_set_${sSlot}_${sSerie}`, title: `✅ Concluir Série ${data.currentSerieNum}` }
-          ]
-        });
-      }
-      notifyClients({ type: 'WORKOUT_NOTIFICATION_ACTION', action: 'skip_rest', timestamp: Date.now() });
-    })());
-    return;
-  }
-
-  // 2. Concluir Série (complete_set_slot_serie)
+  // 1. Concluir Série (complete_set_slot_serie)
   if (action && action.startsWith('complete_set')) {
     const parts = action.split('_');
     const slotIdx = parseInt(parts[2], 10);
@@ -545,7 +389,7 @@ self.addEventListener('notificationclick', (event) => {
     return;
   }
 
-  // 3. Finalizar Treino
+  // 2. Finalizar Treino
   if (action === 'finish_workout') {
     notifyClients({ type: 'WORKOUT_NOTIFICATION_ACTION', action: 'finish_workout', timestamp: Date.now() });
     event.waitUntil(
@@ -588,21 +432,8 @@ self.addEventListener('message', (event) => {
     return;
   }
 
-  // 2. Iniciar cronômetro disparado pela aba
-  if (event.data.type === 'START_TIMER_COUNTDOWN') {
-    startSWTimer(event.data);
-    return;
-  }
-
-  // 3. Parar cronômetro disparado pela aba
-  if (event.data.type === 'STOP_TIMER_COUNTDOWN') {
-    clearActiveTimer();
-    return;
-  }
-
-  // 4. Limpeza total ao encerrar o treino
+  // 2. Limpeza total ao encerrar o treino
   if (event.data.type === 'CLEAR_WORKOUT_SESSION') {
-    clearActiveTimer();
     clearStoredSession();
     return;
   }
