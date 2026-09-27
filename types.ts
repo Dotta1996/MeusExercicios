@@ -9,6 +9,10 @@ export interface UserProfile {
   ultimoTreinoRealizado: string | null;
   dataCadastro: string;
   totalTreinosConcluidos?: number;
+  // Preferências de avisos sonoros e notificações (padrão: tudo ativado quando ausente)
+  somAlertaAtivado?: boolean;
+  vibracaoAtivada?: boolean;
+  notificacoesRelogioAtivadas?: boolean;
 }
 
 export interface Exercicio {

@@ -1,4 +1,4 @@
-import { collection, doc, getDoc, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, increment } from 'firebase/firestore';
 import { db } from '../firebase';
 import { Exercicio, Treino, ExecucaoTreino, UserProfile, SessaoAtiva } from '../types';
 
@@ -287,19 +287,18 @@ export const addExecucao = async (data: Omit<ExecucaoTreino, 'id'>) => {
 
   monthlyCache.set(cacheKey, updatedItems);
 
-  // Atualiza contador total no perfil do usuário sem precisar ler o banco todo
-  try {
-    const userRef = doc(db, 'Users', data.userId);
-    const userSnap = await getDoc(userRef);
-    if (userSnap.exists()) {
-      const currentTotal = userSnap.data().totalTreinosConcluidos || 0;
-      await updateDoc(userRef, { 
-        totalTreinosConcluidos: currentTotal + (newItem.status === 'concluido' ? 1 : 0),
-        ultimoTreinoRealizado: newItem.treinoId
-      });
+  // Atualiza contador total no perfil do usuário de forma atômica (increment do
+  // servidor) — o padrão anterior (ler o valor, somar, gravar) podia perder
+  // incrementos quando dois treinos eram salvos em sequência rápida (ex: dois
+  // treinos no mesmo dia), já que a leitura de um podia ficar desatualizada
+  // antes da gravação do outro terminar.
+  if (newItem.status === 'concluido') {
+    try {
+      const userRef = doc(db, 'Users', data.userId);
+      await updateDoc(userRef, { totalTreinosConcluidos: increment(1) });
+    } catch (e) {
+      console.warn("Aviso ao atualizar perfil do usuário:", e);
     }
-  } catch (e) {
-    console.warn("Aviso ao atualizar perfil do usuário:", e);
   }
 
   return newItem;

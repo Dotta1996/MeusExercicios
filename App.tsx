@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './AuthContext';
+import { registerGlobalWorkoutNotificationListener } from './services/workoutActions';
 import { Layout } from './components/Layout';
 import { Login } from './pages/Login';
 import { Home } from './pages/Home';
@@ -56,6 +57,14 @@ const AppRoutes = () => {
 };
 
 export default function App() {
+  // Registrado uma única vez, independente de login/rota: garante que os botões
+  // de ação da notificação (Concluir Série, Pular Exercício) funcionem mesmo que
+  // o app tenha sido reaberto do zero pela própria notificação, com a tela de
+  // execução ainda não montada.
+  useEffect(() => {
+    registerGlobalWorkoutNotificationListener();
+  }, []);
+
   return (
     <AuthProvider>
       <Router>

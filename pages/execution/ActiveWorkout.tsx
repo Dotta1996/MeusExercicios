@@ -6,6 +6,16 @@ import { getTreinos, getExercicios, addExecucao, updateUserProfile, getLastExerc
 import { Treino, Exercicio, ExercicioExecutado, SerieExecutada, TreinoSlot, SessaoAtiva } from '../../types';
 import { getStoredWorkoutSession, saveStoredWorkoutSession, clearStoredWorkoutSession, StoredWorkoutSession } from '../../services/workoutSync';
 import { Check, Square, Timer, Plus, Minus, X, ChevronDown, ChevronUp, Weight, Layers, Settings2, Save, AlertTriangle, FileText, Edit2, Bell, BellRing, BellOff, Watch, Sparkles, HelpCircle } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
+import { LocalNotifications } from '@capacitor/local-notifications';
+import {
+  buildStatusNotificationContent,
+  cancelRestAlarmNotification,
+  clearStatusNotification,
+  fireRestStartNotifications,
+  fireStatusNotification,
+  getSlotTimerInfo as getSlotTimerInfoShared
+} from '../../services/nativeNotifications';
 
 type ExtendedNotificationOptions = NotificationOptions & {
   actions?: { action: string; title: string; icon?: string }[];
@@ -17,7 +27,7 @@ export const ActiveWorkout: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, refreshProfile } = useAuth();
+  const { user, profile, refreshProfile } = useAuth();
   
   const [treino, setTreino] = useState<Treino | null>(null);
   const [allExs, setAllExs] = useState<Record<string, Exercicio>>({});
@@ -37,6 +47,13 @@ export const ActiveWorkout: React.FC = () => {
   const [watchModeEnabled, setWatchModeEnabled] = useState<boolean>(true);
   const [showWatchHelp, setShowWatchHelp] = useState<boolean>(false);
 
+  // Aplica a preferência salva no perfil (tela de configurações) assim que ele carrega
+  useEffect(() => {
+    if (profile) {
+      setWatchModeEnabled(profile.notificacoesRelogioAtivadas !== false);
+    }
+  }, [profile]);
+
   // Referências sincronizadas para o listener do Service Worker
   const execucaoDataRef = useRef(execucaoData);
   const activeSlotIndexRef = useRef(activeSlotIndex);
@@ -45,6 +62,7 @@ export const ActiveWorkout: React.FC = () => {
   const timerActiveRef = useRef(timerActive);
   const watchModeEnabledRef = useRef(watchModeEnabled);
   const allExsRef = useRef(allExs);
+  const profileRef = useRef(profile);
   const handleEncerrarTreinoRef = useRef<() => void>(() => {});
 
   useEffect(() => { execucaoDataRef.current = execucaoData; }, [execucaoData]);
@@ -53,6 +71,7 @@ export const ActiveWorkout: React.FC = () => {
   useEffect(() => { timeLeftRef.current = timeLeft; }, [timeLeft]);
   useEffect(() => { timerActiveRef.current = timerActive; }, [timerActive]);
   useEffect(() => { watchModeEnabledRef.current = watchModeEnabled; }, [watchModeEnabled]);
+  useEffect(() => { profileRef.current = profile; }, [profile]);
   useEffect(() => { allExsRef.current = allExs; }, [allExs]);
 
   // Estados para o Modal de Ajuste
@@ -274,6 +293,25 @@ export const ActiveWorkout: React.FC = () => {
     }
   };
 
+  // Registro dos canais/botões nativos e o listener de ações de notificação
+  // (Concluir Série, Pular Exercício, Finalizar Treino) vivem fora desta tela —
+  // em services/workoutActions.ts, registrado uma única vez em App.tsx — porque
+  // precisam funcionar mesmo que o app tenha sido reaberto do zero pela própria
+  // notificação, antes desta tela conseguir montar.
+
+  // Usado só como fallback de desenvolvimento (fora do app instalado/nativo).
+  const scheduleRestAlarm = async (seconds: number, label: string) => {
+    if (!Capacitor.isNativePlatform()) {
+      openNativeTimer(seconds, label);
+      return;
+    }
+    await fireRestStartNotifications(seconds, label, null);
+  };
+
+  const cancelRestAlarm = () => {
+    cancelRestAlarmNotification();
+  };
+
   // Manter a tela ativa durante o treino (Screen Wake Lock API)
   useEffect(() => {
     let wakeLockSentinel: any = null;
@@ -304,23 +342,8 @@ export const ActiveWorkout: React.FC = () => {
 
   // Obter o tempo exato configurado pelo usuário para o exercício deste slot
   const getSlotTimerInfo = (slotIndex: number): { duration: number; enabled: boolean } => {
-    const curTreino = treinoRef.current;
-    const curAllExs = allExsRef.current;
-    if (!curTreino) return { duration: 60, enabled: true };
-    const slot = curTreino.listaExercicios[slotIndex];
-    if (!slot) return { duration: 60, enabled: true };
-    const ids = typeof slot === 'string' ? [slot] : slot.ids;
-    
-    for (const exId of ids) {
-      const ex = curAllExs[exId];
-      if (ex) {
-        const enabled = ex.timerAtivo !== false;
-        const numDur = Number(ex.timerPadrao);
-        const duration = !isNaN(numDur) && numDur > 0 ? Math.round(numDur) : 60;
-        return { duration, enabled };
-      }
-    }
-    return { duration: 60, enabled: true };
+    if (!treinoRef.current) return { duration: 60, enabled: true };
+    return getSlotTimerInfoShared(treinoRef.current, allExsRef.current, slotIndex);
   };
 
   // Sincronizar o estado da sessão com IndexedDB e o Service Worker
@@ -367,6 +390,10 @@ export const ActiveWorkout: React.FC = () => {
   };
 
   const clearWorkoutNotification = async () => {
+    if (Capacitor.isNativePlatform()) {
+      await clearStatusNotification();
+      return;
+    }
     try {
       if ("serviceWorker" in navigator) {
         const reg = await navigator.serviceWorker.ready;
@@ -381,106 +408,38 @@ export const ActiveWorkout: React.FC = () => {
   };
 
   const syncWorkoutNotification = async (overrideExecData?: Record<string, ExercicioExecutado>) => {
-    if (!("Notification" in window) || Notification.permission !== "granted" || !watchModeEnabledRef.current) return;
-    if (!treinoRef.current) return;
-
-    try {
-      if (!("serviceWorker" in navigator)) return;
-      const reg = await navigator.serviceWorker.ready;
-      if (!reg || !("showNotification" in reg)) return;
-
-      const currentExecData = overrideExecData || execucaoDataRef.current;
-      const currentSlotIdx = activeSlotIndexRef.current ?? 0;
-      const currentTreino = treinoRef.current;
-      const currentAllExs = allExsRef.current;
-
-      // Localizar o slot atual ou primeiro incompleto
-      let targetSlotIdx = currentSlotIdx;
-      let targetSlot = currentTreino.listaExercicios[targetSlotIdx];
-
-      if (targetSlot) {
-        const slotIds = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
-        const isSlotDone = slotIds.every(id => currentExecData[`${targetSlotIdx}-${id}`]?.concluido);
-        if (isSlotDone) {
-          const nextIncomplete = currentTreino.listaExercicios.findIndex((sl, idx) => {
-            const ids = typeof sl === 'string' ? [sl] : sl.ids;
-            return !ids.every(id => currentExecData[`${idx}-${id}`]?.concluido);
-          });
-          if (nextIncomplete !== -1) {
-            targetSlotIdx = nextIncomplete;
-            targetSlot = currentTreino.listaExercicios[targetSlotIdx];
-          }
-        }
-      }
-
-      // Se todas as séries de todos os slots foram concluídas
-      const allSlotsFinished = currentTreino.listaExercicios.every((sl, idx) => {
-        const ids = typeof sl === 'string' ? [sl] : sl.ids;
-        return ids.every(id => currentExecData[`${idx}-${id}`]?.concluido);
-      });
-
-      if (allSlotsFinished) {
-        await reg.showNotification("🎉 Treino Concluído!", {
-          body: "Todas as séries foram finalizadas. Toque para encerrar e salvar!",
-          icon: "/icon-192.png",
-          badge: "/icon-192.png",
-          tag: "workout-interactive-tracker",
-          renotify: false,
-          actions: [
-            { action: 'finish_workout', title: '🏁 Finalizar Treino' }
-          ]
-        } as ExtendedNotificationOptions);
-        return;
-      }
-
-      if (!targetSlot) return;
-
-      const ids = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
-      const firstExId = ids[0];
-      const exName = ids.map(id => currentAllExs[id]?.nome || 'Exercício').join(' / ');
-      const seriesList = currentExecData[`${targetSlotIdx}-${firstExId}`]?.series || [];
-      const uncompletedIdx = seriesList.findIndex(s => !s.concluida);
-
-      const currentSerieNum = uncompletedIdx !== -1 ? uncompletedIdx + 1 : seriesList.length;
-      const totalSeries = seriesList.length;
-      const currentReps = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].reps : 10;
-      const currentPeso = uncompletedIdx !== -1 ? seriesList[uncompletedIdx].peso : 0;
-
-      // Notificação acionável com o próximo passo (série atual/seguinte).
-      // O descanso em si é contado pelo app nativo de Timer do Android, então
-      // esta notificação não precisa ficar se atualizando a cada segundo.
-      const targetSerie = uncompletedIdx !== -1 ? uncompletedIdx : 0;
-      await reg.showNotification(`🔔 Série ${currentSerieNum}/${totalSeries} • ${exName}`, {
-        body: `${currentReps} reps • ${currentPeso}kg | Toque abaixo ao concluir`,
-        icon: "/icon-192.png",
-        badge: "/icon-192.png",
-        tag: "workout-interactive-tracker",
-        renotify: true,
-        data: {
-          type: 'complete_set',
-          slotIdx: targetSlotIdx,
-          serieIdx: targetSerie
-        },
-        actions: [
-          { action: `complete_set_${targetSlotIdx}_${targetSerie}`, title: `✅ Concluir Série ${currentSerieNum}` }
-        ]
-      } as ExtendedNotificationOptions);
-
-    } catch (e) {
-      console.warn("Erro ao emitir notificação interativa:", e);
-    }
+    if (!watchModeEnabledRef.current || !treinoRef.current) return;
+    const currentExecData = overrideExecData || execucaoDataRef.current;
+    const content = buildStatusNotificationContent(treinoRef.current, allExsRef.current, currentExecData, activeSlotIndexRef.current ?? 0);
+    if (!content) return;
+    await fireStatusNotification(content);
   };
 
   const requestNotifPermission = async () => {
-    if (!("Notification" in window)) return;
-    try {
-      const res = await Notification.requestPermission();
-      setNotifPermission(res);
-      if (res === 'granted') {
-        syncWorkoutNotification();
+    if ("Notification" in window) {
+      try {
+        const res = await Notification.requestPermission();
+        setNotifPermission(res);
+        if (res === 'granted') {
+          syncWorkoutNotification();
+        }
+      } catch (e) {
+        console.warn("Erro ao solicitar permissão de notificação:", e);
       }
-    } catch (e) {
-      console.warn("Erro ao solicitar permissão de notificação:", e);
+    }
+
+    // No app nativo, aproveita o mesmo botão para configurar o alarme de descanso:
+    // permissão de notificação + permissão de alarme exato (necessária no Android 14+).
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await LocalNotifications.requestPermissions();
+        const exact = await LocalNotifications.checkExactNotificationSetting();
+        if (exact.exact_alarm !== 'granted') {
+          await LocalNotifications.changeExactNotificationSetting();
+        }
+      } catch (e) {
+        console.warn("Erro ao configurar alarme de descanso:", e);
+      }
     }
   };
 
@@ -516,8 +475,10 @@ export const ActiveWorkout: React.FC = () => {
   // Bônus apenas para quando o app está em primeiro plano — o alarme confiável
   // de fim de descanso já é responsabilidade do app nativo de Timer do Android.
   const notifyTimerComplete = () => {
-    playSoundAlert();
-    if ("vibrate" in navigator) {
+    if (profileRef.current?.somAlertaAtivado !== false) {
+      playSoundAlert();
+    }
+    if (profileRef.current?.vibracaoAtivada !== false && "vibrate" in navigator) {
       try {
         navigator.vibrate([400, 200, 400, 200, 800]);
       } catch {}
@@ -660,45 +621,25 @@ export const ActiveWorkout: React.FC = () => {
     setTimeLeft(seconds);
     setTimerActive(true);
 
-    // Resolver o nome do exercício para exibir no timer nativo do Android
-    const currentExecData = explicitExecData || execucaoDataRef.current;
-    const currentSlotIdx = targetSlotIndex !== undefined ? targetSlotIndex : (activeSlotIndexRef.current ?? 0);
-    const currentTreino = treinoRef.current;
-    const currentAllExs = allExsRef.current;
-    let exName = 'Descanso';
+    if (treinoRef.current) {
+      const currentExecData = explicitExecData || execucaoDataRef.current;
+      const fromSlotIdx = targetSlotIndex !== undefined ? targetSlotIndex : (activeSlotIndexRef.current ?? 0);
+      const statusContent = buildStatusNotificationContent(treinoRef.current, allExsRef.current, currentExecData, fromSlotIdx);
+      const exName = statusContent && statusContent.kind === 'next-step' ? statusContent.exName : 'Descanso';
 
-    if (currentTreino) {
-      let resolvedSlotIdx = currentSlotIdx;
-      let targetSlot = currentTreino.listaExercicios[resolvedSlotIdx];
-
-      if (targetSlot) {
-        const slotIds = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
-        const isSlotDone = slotIds.every(id => currentExecData[`${resolvedSlotIdx}-${id}`]?.concluido);
-        if (isSlotDone) {
-          const nextIncomplete = currentTreino.listaExercicios.findIndex((sl, idx) => {
-            const ids = typeof sl === 'string' ? [sl] : sl.ids;
-            return !ids.every(id => currentExecData[`${idx}-${id}`]?.concluido);
-          });
-          if (nextIncomplete !== -1) {
-            resolvedSlotIdx = nextIncomplete;
-            targetSlot = currentTreino.listaExercicios[resolvedSlotIdx];
-          }
-        }
-      }
-
-      if (targetSlot) {
-        const ids = typeof targetSlot === 'string' ? [targetSlot] : targetSlot.ids;
-        exName = ids.map(id => currentAllExs[id]?.nome || 'Exercício').join(' / ');
+      if (Capacitor.isNativePlatform()) {
+        // Mostra a contagem visual agora e agenda a notificação acionável
+        // (com os botões) pra aparecer só quando o descanso terminar de verdade.
+        // Usa targetEnd (calculado acima) em vez de recalcular a partir de
+        // "seconds", pra nunca divergir do cronômetro mostrado na tela do app.
+        fireRestStartNotifications(targetEnd, exName, statusContent);
+      } else {
+        openNativeTimer(seconds, exName);
+        syncWorkoutNotification(explicitExecData);
       }
     }
-
-    // Aciona o alarme confiável no app nativo de Timer do Android...
-    openNativeTimer(seconds, exName);
-    // ...e mostra imediatamente a notificação acionável com o próximo passo
-    // (não depende de nenhuma contagem em segundo plano para aparecer).
-    syncWorkoutNotification(explicitExecData);
   };
-  
+
   const stopTimer = () => {
     timerActiveRef.current = false;
     timeLeftRef.current = null;
@@ -712,6 +653,10 @@ export const ActiveWorkout: React.FC = () => {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
+    cancelRestAlarm();
+    // O usuário decidiu não esperar o descanso — mostra a notificação acionável
+    // (que estava agendada pro fim do descanso) já, em vez de esperar.
+    syncWorkoutNotification();
   };
 
   const toggleExpandSlot = (index: number) => {
@@ -778,81 +723,6 @@ export const ActiveWorkout: React.FC = () => {
       alert("Erro ao salvar observação.");
     } finally {
       setSavingObs(false);
-    }
-  };
-
-  // Marcar explicitamente uma série como concluída (idempotente, usado por ações do smartwatch/notificações)
-  const completeSerieSlot = (slotIndex: number, sIndex: number) => {
-    const curTreino = treinoRef.current;
-    if (!curTreino) return;
-    const slot = curTreino.listaExercicios[slotIndex];
-    if (!slot) return;
-    const ids = typeof slot === 'string' ? [slot] : slot.ids;
-    
-    const firstKey = `${slotIndex}-${ids[0]}`;
-    const currentData = execucaoDataRef.current;
-    if (!currentData[firstKey] || !currentData[firstKey].series) return;
-
-    // Se a série indicada já estiver concluída ou fora dos limites, encontrar a primeira pendente
-    let targetIdx = sIndex;
-    if (!currentData[firstKey].series[targetIdx] || currentData[firstKey].series[targetIdx].concluida) {
-      const pendingIdx = currentData[firstKey].series.findIndex(s => !s.concluida);
-      if (pendingIdx !== -1) {
-        targetIdx = pendingIdx;
-      } else {
-        return; // Todas as séries já estão concluídas
-      }
-    }
-
-    // Obter o timer configurado no exercício
-    const { duration: timerDuration, enabled: shouldStartTimer } = getSlotTimerInfo(slotIndex);
-
-    const next = { ...currentData };
-    ids.forEach(exId => {
-      const key = `${slotIndex}-${exId}`;
-      if (next[key]) {
-        const newSeries = [...next[key].series];
-        if (newSeries[targetIdx]) {
-          newSeries[targetIdx] = { ...newSeries[targetIdx], concluida: true };
-        }
-        next[key] = { ...next[key], series: newSeries };
-      }
-    });
-
-    const allSeriesDone = ids.every(id => next[`${slotIndex}-${id}`]?.series.every(s => s.concluida));
-    let nextSlotIndex = slotIndex;
-
-    if (allSeriesDone) {
-      ids.forEach(id => { 
-        const key = `${slotIndex}-${id}`;
-        next[key] = { ...next[key], concluido: true };
-      });
-      if (curTreino.listaExercicios[slotIndex + 1]) {
-        nextSlotIndex = slotIndex + 1;
-      }
-      setTimeout(() => {
-        setActiveSlotIndex(prev => {
-          if (prev === slotIndex && curTreino.listaExercicios[slotIndex + 1]) {
-            return slotIndex + 1;
-          }
-          return prev;
-        });
-      }, 500);
-    } else {
-      ids.forEach(id => { 
-        const key = `${slotIndex}-${id}`;
-        next[key] = { ...next[key], concluido: false };
-      });
-      // Mantém o exercício aberto para que o usuário veja a série marcada
-      setActiveSlotIndex(slotIndex);
-    }
-    
-    execucaoDataRef.current = next;
-    setExecucaoData(next);
-    syncSessionToLocalAndSW(next, nextSlotIndex);
-
-    if (shouldStartTimer) {
-      startTimer(timerDuration, slotIndex, next);
     }
   };
 
@@ -926,12 +796,14 @@ export const ActiveWorkout: React.FC = () => {
     
     execucaoDataRef.current = next;
     setExecucaoData(next);
-    syncSessionToLocalAndSW(next, nextSlotIndex);
-
-    // Iniciar o cronômetro do descanso FORA do callback do setExecucaoData
+    // Inicia o cronômetro ANTES de sincronizar a sessão, pra sincronização já
+    // gravar o novo alvo do descanso — se fosse depois, gravaria (por uma
+    // fração de segundo) o alvo do descanso anterior/já encerrado, e quem lesse
+    // a sessão nesse intervalo veria o tempo restante errado.
     if (newState && shouldStartTimer) {
       startTimer(timerDuration, slotIndex, next);
     }
+    syncSessionToLocalAndSW(next, nextSlotIndex);
   };
 
   // Sincronização em tempo real das ações do Service Worker (smartwatch / barra de notificações / abas)
@@ -971,8 +843,8 @@ export const ActiveWorkout: React.FC = () => {
       if (!event.data) return;
       if (event.data.type === 'WORKOUT_STATE_UPDATED' && event.data.session) {
         handleRemoteSessionUpdate(event.data.session);
-      } else if (event.data.type === 'OPEN_NATIVE_TIMER') {
-        openNativeTimer(event.data.seconds, event.data.label);
+      } else if (event.data.type === 'SCHEDULE_REST_ALARM') {
+        scheduleRestAlarm(event.data.seconds, event.data.label);
       } else if (event.data.type === 'WORKOUT_NOTIFICATION_ACTION') {
         if (event.data.action === 'finish_workout') {
           handleEncerrarTreinoRef.current();
@@ -986,8 +858,8 @@ export const ActiveWorkout: React.FC = () => {
       bc.onmessage = (event) => {
         if (event.data?.type === 'WORKOUT_STATE_UPDATED' && event.data.session) {
           handleRemoteSessionUpdate(event.data.session);
-        } else if (event.data?.type === 'OPEN_NATIVE_TIMER') {
-          openNativeTimer(event.data.seconds, event.data.label);
+        } else if (event.data?.type === 'SCHEDULE_REST_ALARM') {
+          scheduleRestAlarm(event.data.seconds, event.data.label);
         } else if (event.data?.type === 'WORKOUT_NOTIFICATION_ACTION') {
           if (event.data.action === 'finish_workout') {
             handleEncerrarTreinoRef.current();
@@ -1116,7 +988,11 @@ export const ActiveWorkout: React.FC = () => {
         exerciciosExecutados: arrData,
         status: arrData.every(e => e.concluido) ? 'concluido' : 'incompleto'
       });
-      await updateUserProfile(user.uid, { ultimoTreinoRealizado: treino.id });
+      // Treinos esporádicos não fazem parte da sequência, então não podem avançar
+      // (nem resetar) o ponteiro de "próximo treino" usado em Home.tsx.
+      if (!treino.esporadico) {
+        await updateUserProfile(user.uid, { ultimoTreinoRealizado: treino.id });
+      }
       await deleteSessaoAtiva(user.uid);
       await clearStoredWorkoutSession();
 

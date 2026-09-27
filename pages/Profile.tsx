@@ -1,7 +1,36 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../AuthContext';
 import { updateUserProfile } from '../services/dbService';
-import { Save, LogOut } from 'lucide-react';
+import { Save, LogOut, Volume2, Vibrate, Watch } from 'lucide-react';
+
+const ToggleRow: React.FC<{
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  onToggle: () => void;
+}> = ({ icon, title, description, checked, disabled, onToggle }) => (
+  <div className="bg-black/60 border border-zinc-800/80 rounded-2xl p-4 flex items-center justify-between">
+    <div className="flex items-start space-x-3 mr-3 min-w-0">
+      <div className="text-brand-400 shrink-0 mt-0.5">{icon}</div>
+      <div className="min-w-0">
+        <p className="text-xs font-bold text-white">{title}</p>
+        <p className="text-[11px] text-zinc-400">{description}</p>
+      </div>
+    </div>
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onToggle}
+      className={`w-12 h-6 rounded-full transition-colors relative flex items-center px-0.5 shrink-0 disabled:opacity-50 ${
+        checked ? 'bg-emerald-500' : 'bg-zinc-700'
+      }`}
+    >
+      <div className={`w-5 h-5 rounded-full bg-white transition-transform ${checked ? 'translate-x-6' : 'translate-x-0'}`} />
+    </button>
+  </div>
+);
 
 export const Profile: React.FC = () => {
   const { profile, refreshProfile, logout } = useAuth();
@@ -12,6 +41,7 @@ export const Profile: React.FC = () => {
     altura: ''
   });
   const [saving, setSaving] = useState(false);
+  const [savingPref, setSavingPref] = useState<string | null>(null);
 
   useEffect(() => {
     if (profile) {
@@ -44,6 +74,24 @@ export const Profile: React.FC = () => {
       setSaving(false);
     }
   };
+
+  const togglePref = async (field: 'somAlertaAtivado' | 'vibracaoAtivada' | 'notificacoesRelogioAtivadas', current: boolean) => {
+    if (!profile) return;
+    setSavingPref(field);
+    try {
+      await updateUserProfile(profile.uid, { [field]: !current });
+      await refreshProfile();
+    } catch (error) {
+      console.error("Error updating notification preference", error);
+      alert('Erro ao atualizar preferência.');
+    } finally {
+      setSavingPref(null);
+    }
+  };
+
+  const somAtivado = profile?.somAlertaAtivado !== false;
+  const vibracaoAtivada = profile?.vibracaoAtivada !== false;
+  const notificacoesRelogioAtivadas = profile?.notificacoesRelogioAtivadas !== false;
 
   return (
     <div className="max-w-md mx-auto">
@@ -104,6 +152,37 @@ export const Profile: React.FC = () => {
           {saving ? 'Salvando...' : 'Salvar Alterações'}
         </button>
       </form>
+
+      <div className="mt-6 bg-zinc-900 p-6 rounded-xl border border-zinc-800">
+        <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-1">Avisos Sonoros e Notificações</h3>
+        <p className="text-xs text-zinc-500 mb-4">Controle os alertas durante o treino</p>
+        <div className="space-y-3">
+          <ToggleRow
+            icon={<Volume2 size={18} />}
+            title="Som"
+            description="Toca um beep ao concluir o descanso (com o app aberto)"
+            checked={somAtivado}
+            disabled={savingPref === 'somAlertaAtivado'}
+            onToggle={() => togglePref('somAlertaAtivado', somAtivado)}
+          />
+          <ToggleRow
+            icon={<Vibrate size={18} />}
+            title="Vibração"
+            description="Vibra ao concluir séries e descansos"
+            checked={vibracaoAtivada}
+            disabled={savingPref === 'vibracaoAtivada'}
+            onToggle={() => togglePref('vibracaoAtivada', vibracaoAtivada)}
+          />
+          <ToggleRow
+            icon={<Watch size={18} />}
+            title="Relógio e Barra de Notificações"
+            description="Mostra a próxima série com botões no relógio/notificações"
+            checked={notificacoesRelogioAtivadas}
+            disabled={savingPref === 'notificacoesRelogioAtivadas'}
+            onToggle={() => togglePref('notificacoesRelogioAtivadas', notificacoesRelogioAtivadas)}
+          />
+        </div>
+      </div>
 
       <button onClick={logout} className="mt-8 w-full flex justify-center items-center py-3 text-red-400 hover:text-red-300 bg-red-950/20 rounded-lg border border-red-900/30">
         <LogOut size={20} className="mr-2" />

@@ -1,7 +1,10 @@
-const CACHE_NAME = 'meusex-v2.4.0';
+const CACHE_NAME = 'meusex-v2.5.0';
+// Importante: NÃO incluir '/' nem '/index.html' aqui. Esses arquivos mudam a cada
+// build (referenciam o bundle JS com hash novo) e, se ficarem em cache "para sempre",
+// o app passa a rodar código antigo mesmo depois de reinstalar um APK mais novo — foi
+// exatamente isso que causou telas/correções "sumidas" depois de builds anteriores.
+// Eles são tratados como network-first no handler de 'fetch' abaixo.
 const ASSETS_TO_CACHE = [
-  '/',
-  '/index.html',
   '/manifest.json',
   '/icon.svg',
   '/icon-180.png',
@@ -85,33 +88,23 @@ const notifyClients = (payload) => {
   } catch (e) {}
 };
 
-// Aciona o app nativo de Timer/Relógio do Android para contar o descanso.
-// O AlarmManager do sistema garante que o alarme toca na hora certa mesmo
-// com a tela apagada — diferente de um setInterval dentro do Service Worker,
-// que o navegador pode suspender a qualquer momento em segundo plano.
-const buildTimerIntentUrl = (seconds, label) => {
-  const msg = encodeURIComponent((label || 'Descanso').substring(0, 100));
-  return `intent:#Intent;action=android.intent.action.SET_TIMER;i.android.intent.extra.alarm.LENGTH=${Math.max(1, Math.round(seconds))};S.android.intent.extra.alarm.MESSAGE=${msg};B.android.intent.extra.alarm.SKIP_UI=true;end`;
-};
-
+// Pede pra aba do app agendar o alarme de descanso via LocalNotifications
+// (AlarmManager nativo do Android) — o Service Worker não tem acesso direto
+// aos plugins nativos do Capacitor, só a aba (contexto da janela) tem.
 const triggerNativeTimer = async (seconds, label) => {
   try {
     const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
     if (clientList && clientList.length > 0) {
       clientList.forEach(client => {
         try {
-          client.postMessage({ type: 'OPEN_NATIVE_TIMER', seconds, label });
+          client.postMessage({ type: 'SCHEDULE_REST_ALARM', seconds, label });
         } catch (e) {}
       });
-      return;
     }
-    // Sem nenhuma aba aberta (ação disparada só pelo relógio): melhor esforço
-    // para abrir o timer nativo diretamente a partir do Service Worker.
-    if (clients.openWindow) {
-      await clients.openWindow(buildTimerIntentUrl(seconds, label));
-    }
+    // Sem nenhuma aba/instância do app aberta (ação disparada só pelo relógio,
+    // app totalmente fechado): não há como agendar o alarme nativo neste caso.
   } catch (e) {
-    console.warn('Erro ao acionar o timer nativo:', e);
+    console.warn('Erro ao acionar o alarme de descanso:', e);
   }
 };
 
@@ -351,7 +344,18 @@ self.addEventListener('fetch', (event) => {
   ) {
     return;
   }
-  
+
+  // Navegação (a própria página) e o index.html: sempre busca a versão mais nova
+  // primeiro. Só cai pro cache se estiver genuinamente offline. Isso garante que
+  // builds novos (novas telas, correções) apareçam assim que o app é reinstalado/
+  // atualizado, em vez de ficar preso numa versão antiga em cache.
+  if (event.request.mode === 'navigate' || url.pathname === '/index.html') {
+    event.respondWith(
+      fetch(event.request).catch(() => caches.match('/index.html').then((r) => r || caches.match('/')))
+    );
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request).then((response) => {
       if (response) {
